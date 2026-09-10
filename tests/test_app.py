@@ -111,3 +111,17 @@ def test_find_replace_download_save(client, tmp_path):
 def test_unknown_doc(client):
     assert client.get("/api/doc/nope").status_code == 404
     assert client.get("/").status_code == 200
+
+
+def test_ink_and_image_cache_headers(client):
+    d = open_doc(client)["id"]
+    key = client.get(f"/api/doc/{d}").get_json()["pages"][0]["key"]
+    r = client.get(f"/api/doc/{d}/page/0/image?zoom=0.5&v={key}")
+    assert r.status_code == 200 and "immutable" in r.headers["Cache-Control"]
+    r = client.get(f"/api/doc/{d}/page/0/image?zoom=0.5")
+    assert r.headers["Cache-Control"] == "no-store"
+    r = client.post(f"/api/doc/{d}/page/0/ink", json={"points": [[100, 100], [150, 120], [200, 100]], "color": "#ff0000", "width": 3})
+    st = r.get_json()
+    assert r.status_code == 200 and st["pages"][0]["key"] != key and st["pages"][1]["key"] == client.get(f"/api/doc/{d}").get_json()["pages"][1]["key"]
+    assert client.post(f"/api/doc/{d}/page/0/ink", json={"points": []}).status_code == 400
+    assert client.post(f"/api/doc/{d}/page/0/ink", json={"points": [["a", 1]]}).status_code == 400

@@ -9,6 +9,7 @@ import io
 import threading
 import uuid
 import webbrowser
+from collections import OrderedDict
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
@@ -24,6 +25,34 @@ def create_app(initial_file: str | None = None) -> Flask:
     docs: dict[str, PDFEditor] = {}
     names: dict[str, str] = {}
     lock = threading.Lock()
+    # PyMuPDF 는 스레드 안전하지 않으므로 /api/ 요청은 한 번에 하나씩만 처리합니다.
+    api_lock = threading.RLock()
+    # 렌더링 결과 캐시: (doc_id, 페이지 키, zoom) → PNG. 페이지 내용이 바뀌면 키가 달라져 자연히 무효화됩니다.
+    render_cache: OrderedDict[tuple, bytes] = OrderedDict()
+    RENDER_CACHE_MAX = 120
+
+    @app.before_request
+    def _acquire():
+        if request.path.startswith("/api/"):
+            api_lock.acquire()
+            request.environ["pdfeditor.locked"] = True
+
+    @app.teardown_request
+    def _release(exc):
+        if request.environ.pop("pdfeditor.locked", False):
+            api_lock.release()
+
+    def cached_render(doc_id: str, ed: PDFEditor, page: int, zoom: float) -> bytes:
+        key = (doc_id, ed.page_key(page), round(zoom, 3))
+        png = render_cache.get(key)
+        if png is None:
+            png = ed.render_page(page, zoom)
+            render_cache[key] = png
+            while len(render_cache) > RENDER_CACHE_MAX:
+                render_cache.popitem(last=False)
+        else:
+            render_cache.move_to_end(key)
+        return png
 
     def register(editor: PDFEditor, name: str) -> str:
         doc_id = uuid.uuid4().hex[:12]
@@ -143,9 +172,13 @@ def create_app(initial_file: str | None = None) -> Flask:
         ed = get_doc(doc_id)
         zoom = float(request.args.get("zoom", 1.5))
         zoom = max(0.1, min(zoom, 6.0))
-        png = ed.render_page(page, zoom)
+        png = cached_render(doc_id, ed, page, zoom)
         resp = send_file(io.BytesIO(png), mimetype="image/png")
-        resp.headers["Cache-Control"] = "no-store"
+        # v(페이지 키)가 URL 에 들어 있으면 내용이 바뀔 때 URL 도 바뀌므로 브라우저가 오래 캐시해도 안전
+        if request.args.get("v"):
+            resp.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        else:
+            resp.headers["Cache-Control"] = "no-store"
         return resp
 
     @app.get("/api/doc/<doc_id>/page/<int:page>/blocks")
@@ -197,6 +230,28 @@ def create_app(initial_file: str | None = None) -> Flask:
             float(body["height"]) if body.get("height") else None,
         )
         return jsonify({**doc_state(doc_id), "rect": rect})
+
+    @app.post("/api/doc/<doc_id>/page/<int:page>/ink")
+    def ink(doc_id, page):
+        """펜/형광펜 획 추가. points 는 화면 좌표(pt) [[x, y], ...]."""
+        ed = get_doc(doc_id)
+        body = request.get_json(force=True) or {}
+        pts = body.get("points") or []
+        if not isinstance(pts, list) or not pts:
+            abort(400, "points 가 필요합니다.")
+        try:
+            pts = [(float(p[0]), float(p[1])) for p in pts]
+        except (TypeError, ValueError, IndexError):
+            abort(400, "points 형식이 잘못되었습니다.")
+        ed.draw_stroke(
+            page,
+            pts,
+            body.get("color") or "#000000",
+            float(body.get("width") or 2),
+            float(body.get("opacity") or 1),
+            bool(body.get("smooth", True)),
+        )
+        return jsonify(doc_state(doc_id))
 
     @app.post("/api/doc/<doc_id>/find_replace")
     def find_replace(doc_id):

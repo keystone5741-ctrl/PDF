@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import io
 import re
+import threading
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -25,7 +27,7 @@ import pymupdf
 FONT_NAME = "PDFEditorCJK"
 _FALLBACK_FONT: pymupdf.Font | None = None
 
-MAX_UNDO = 30
+MAX_UNDO = 15  # 실행 취소 사본 개수 (문서 전체 사본이라 너무 크게 잡으면 메모리를 많이 씀)
 LINE_HEIGHT = 1.2  # 삽입하는 텍스트의 줄 간격 (글자 크기 배수). 화면 편집 상자와 동일하게 유지.
 
 
@@ -124,8 +126,25 @@ class PDFEditor:
             self.doc = pymupdf.open(str(self.path))
         if self.doc.is_encrypted and not self.doc.authenticate(""):
             raise ValueError("암호로 보호된 PDF 입니다. 먼저 암호를 해제하세요.")
-        self._undo: list[bytes] = []
-        self._redo: list[bytes] = []
+        self._undo: list[tuple[bytes, list[str]]] = []
+        self._redo: list[tuple[bytes, list[str]]] = []
+        # 페이지마다 내용이 바뀔 때만 달라지는 키. 화면에서 썸네일/이미지 캐시 무효화에 씁니다.
+        self._page_keys: list[str] = [self._new_key() for _ in range(self.doc.page_count)]
+        # PyMuPDF 는 스레드 안전하지 않으므로 문서 단위로 모든 작업을 직렬화합니다.
+        self.lock = threading.RLock()
+
+    # ------------------------------------------------------------------ 페이지 키
+    @staticmethod
+    def _new_key() -> str:
+        return uuid.uuid4().hex[:10]
+
+    def _touch(self, index: int) -> None:
+        """index 페이지의 내용이 바뀌었음을 표시."""
+        self._page_keys[index] = self._new_key()
+
+    def page_key(self, index: int) -> str:
+        self._page(index)
+        return self._page_keys[index]
 
     # ------------------------------------------------------------------ 기본 정보
     def close(self) -> None:
@@ -155,6 +174,7 @@ class PDFEditor:
                     "width": page.rect.width,
                     "height": page.rect.height,
                     "rotation": page.rotation,
+                    "key": self._page_keys[i],
                 }
             )
         return out
@@ -246,15 +266,20 @@ class PDFEditor:
         return hits
 
     # ------------------------------------------------------------------ 실행 취소
+    def _state(self) -> tuple[bytes, list[str]]:
+        return self.doc.tobytes(deflate=True), list(self._page_keys)
+
     def _snapshot(self) -> None:
-        self._undo.append(self.doc.tobytes())
+        self._undo.append(self._state())
         if len(self._undo) > MAX_UNDO:
             self._undo.pop(0)
         self._redo.clear()
 
-    def _restore(self, data: bytes) -> None:
+    def _restore(self, state: tuple[bytes, list[str]]) -> None:
+        data, keys = state
         self.doc.close()
         self.doc = pymupdf.open(stream=data, filetype="pdf")
+        self._page_keys = list(keys)
 
     @property
     def can_undo(self) -> bool:
@@ -267,14 +292,14 @@ class PDFEditor:
     def undo(self) -> bool:
         if not self._undo:
             return False
-        self._redo.append(self.doc.tobytes())
+        self._redo.append(self._state())
         self._restore(self._undo.pop())
         return True
 
     def redo(self) -> bool:
         if not self._redo:
             return False
-        self._undo.append(self.doc.tobytes())
+        self._undo.append(self._state())
         self._restore(self._redo.pop())
         return True
 
@@ -319,6 +344,7 @@ class PDFEditor:
             height = n_lines * line_h + font_size * 0.4
         rect = pymupdf.Rect(x, y, x + width, min(page_h, y + height))
         self._insert_in_box(page, rect, text, font_size, fontname, rgb, shrink=False)
+        self._touch(index)
         return (rect.x0, rect.y0, rect.x1, rect.y1)
 
     def _insert_in_box(
@@ -381,6 +407,7 @@ class PDFEditor:
         """
         page = self._page(index)
         self._snapshot()
+        self._touch(index)
         rect = pymupdf.Rect(*bbox)
         rect_unrot = rect * page.derotation_matrix
         rect_unrot.normalize()
@@ -452,6 +479,49 @@ class PDFEditor:
                 count += 1
         return count
 
+    # ------------------------------------------------------------------ 펜 그리기
+    def draw_stroke(
+        self,
+        index: int,
+        points: Sequence[Sequence[float]],
+        color="#000000",
+        width: float = 2.0,
+        opacity: float = 1.0,
+        smooth: bool = True,
+    ) -> None:
+        """화면 좌표 점 목록을 따라 선을 그립니다 (펜/형광펜).
+
+        smooth=True 면 점들을 지나는 부드러운 곡선(Catmull-Rom → Bezier)으로 그립니다.
+        """
+        pts = [pymupdf.Point(float(x), float(y)) for x, y in points]
+        if not pts:
+            raise ValueError("그릴 점이 없습니다.")
+        page = self._page(index)
+        self._snapshot()
+        self._touch(index)
+        m = page.derotation_matrix
+        pts = [p * m for p in pts]
+        rgb = _normalize_color(color)
+        width = max(0.2, float(width))
+        opacity = min(1.0, max(0.05, float(opacity)))
+        shape = page.new_shape()
+        if len(pts) == 1:
+            shape.draw_circle(pts[0], width / 2)
+            shape.finish(color=rgb, fill=rgb, width=0, fill_opacity=opacity, stroke_opacity=opacity)
+        elif len(pts) < 3 or not smooth:
+            shape.draw_polyline(pts)
+            shape.finish(color=rgb, width=width, lineCap=1, lineJoin=1, stroke_opacity=opacity)
+        else:
+            # Catmull-Rom 스플라인을 3차 베지어로 변환
+            ext = [pts[0]] + list(pts) + [pts[-1]]
+            for i in range(1, len(ext) - 2):
+                p0, p1, p2, p3 = ext[i - 1], ext[i], ext[i + 1], ext[i + 2]
+                c1 = p1 + (p2 - p0) * (1 / 6)
+                c2 = p2 - (p3 - p1) * (1 / 6)
+                shape.draw_bezier(p1, c1, c2, p2)
+            shape.finish(color=rgb, width=width, lineCap=1, lineJoin=1, stroke_opacity=opacity)
+        shape.commit()
+
     # ------------------------------------------------------------------ 페이지 조작
     def reorder_pages(self, order: Iterable[int]) -> None:
         """order 는 새 순서대로 나열한 0 기반 페이지 번호 목록 (모든 페이지를 정확히 한 번씩)."""
@@ -462,6 +532,7 @@ class PDFEditor:
             return
         self._snapshot()
         self.doc.select(order)
+        self._page_keys = [self._page_keys[i] for i in order]
 
     def move_page(self, src: int, dst: int) -> None:
         """src 페이지를 dst 위치로 옮깁니다 (둘 다 0 기반)."""
@@ -484,20 +555,25 @@ class PDFEditor:
             return
         self._snapshot()
         self.doc.delete_pages(indices)
+        drop = set(indices)
+        self._page_keys = [k for i, k in enumerate(self._page_keys) if i not in drop]
 
     def rotate_page(self, index: int, degrees: int) -> None:
         page = self._page(index)
         self._snapshot()
         page.set_rotation((page.rotation + degrees) % 360)
+        self._touch(index)
 
     def insert_blank_page(self, index: int | None = None, width: float = 595, height: float = 842) -> None:
         self._snapshot()
         self.doc.new_page(pno=-1 if index is None else index, width=width, height=height)
+        self._page_keys.insert(self.page_count - 1 if index is None else index, self._new_key())
 
     def duplicate_page(self, index: int) -> None:
         self._page(index)
         self._snapshot()
         self.doc.fullcopy_page(index, index + 1)
+        self._page_keys.insert(index + 1, self._new_key())
 
     # ------------------------------------------------------------------ 추출 / 저장
     def extract_pages(self, pages: Iterable[int] | str) -> bytes:
