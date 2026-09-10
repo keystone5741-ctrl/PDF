@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 편집기</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='6' y='2' width='20' height='28' rx='3' fill='%232563eb'/%3E%3Crect x='10' y='9' width='12' height='2' fill='white'/%3E%3Crect x='10' y='14' width='12' height='2' fill='white'/%3E%3Crect x='10' y='19' width='8' height='2' fill='white'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f3f4f6; --panel: #ffffff; --border: #d1d5db; --text: #111827; --muted: #6b7280;
+    --accent: #2563eb; --accent-soft: rgba(37, 99, 235, .12); --danger: #dc2626; --ok: #059669;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
+    font-size: 14px; color: var(--text); background: var(--bg); display: flex; flex-direction: column;
+  }
+  button, input, select, textarea { font: inherit; }
+  button {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text); border-radius: 6px;
+    padding: 6px 10px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: #1d4ed8; color: #fff; }
+  button.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  button.danger { color: var(--danger); }
+  button.danger:hover:not(:disabled) { border-color: var(--danger); }
+  input[type=text], input[type=number], textarea, select {
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: #fff; color: var(--text);
+  }
+  input[type=number] { width: 64px; }
+
+  header {
+    display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: var(--panel);
+    border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  header .title { font-weight: 700; font-size: 16px; margin-right: 8px; }
+  header .filename { color: var(--muted); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  header .sep { width: 1px; height: 24px; background: var(--border); margin: 0 4px; }
+  header .spacer { flex: 1; }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  #sidebar {
+    width: 200px; background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0;
+  }
+  #sidebar .side-head { padding: 8px; border-bottom: 1px solid var(--border); display: flex; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
+  #sidebar .side-head button { padding: 3px 6px; font-size: 12px; }
+  #thumbs { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .thumb {
+    border: 2px solid var(--border); border-radius: 8px; background: #fafafa; padding: 6px; cursor: pointer; position: relative; user-select: none;
+  }
+  .thumb:hover { border-color: #9ca3af; }
+  .thumb.current { border-color: var(--accent); background: var(--accent-soft); }
+  .thumb.drag-over { border-top: 4px solid var(--accent); }
+  .thumb.dragging { opacity: .4; }
+  .thumb img { display: block; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  .thumb .meta { display: flex; align-items: center; justify-content: space-between; margin-top: 4px; font-size: 12px; }
+  .thumb .meta label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  .thumb .actions { display: flex; gap: 2px; }
+  .thumb .actions button { padding: 1px 5px; font-size: 11px; line-height: 1.4; border-radius: 4px; }
+
+  #viewer { flex: 1; overflow: auto; position: relative; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
+  #page-wrap { position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.25); background: #fff; display: none; }
+  #page-wrap.addmode { cursor: crosshair; }
+  #page-img { display: block; }
+  #overlay { position: absolute; inset: 0; }
+  .blk {
+    position: absolute; border: 1px dashed transparent; border-radius: 2px; cursor: text;
+  }
+  #page-wrap.showblocks .blk { border-color: rgba(37, 99, 235, .35); }
+  .blk:hover { background: rgba(37, 99, 235, .12); border-color: var(--accent) !important; }
+  .blk.selected { background: rgba(37, 99, 235, .18); border: 1px solid var(--accent) !important; }
+  #empty {
+    margin: auto; text-align: center; color: var(--muted); max-width: 460px; line-height: 1.7;
+  }
+  #empty h2 { color: var(--text); margin-bottom: 4px; }
+  #empty .drop { border: 2px dashed var(--border); border-radius: 12px; padding: 32px; margin-top: 16px; background: var(--panel); }
+  #viewer.drag-over #empty .drop { border-color: var(--accent); background: var(--accent-soft); }
+
+  #editor {
+    width: 300px; background: var(--panel); border-left: 1px solid var(--border); padding: 12px; display: none; flex-direction: column; gap: 10px; overflow-y: auto;
+  }
+  #editor.open { display: flex; }
+  #editor h3 { margin: 0; font-size: 15px; }
+  #editor textarea { width: 100%; min-height: 140px; resize: vertical; line-height: 1.5; }
+  #editor .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #editor .row label { color: var(--muted); font-size: 12px; }
+  #editor .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+  #editor .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 50; }
+  .modal-bg.open { display: flex; }
+  .modal { background: var(--panel); border-radius: 12px; padding: 20px; width: 440px; max-width: calc(100vw - 32px); display: flex; flex-direction: column; gap: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.3); }
+  .modal h3 { margin: 0; }
+  .modal .row { display: flex; gap: 8px; align-items: center; }
+  .modal .row input[type=text] { flex: 1; }
+  .modal .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
+  .modal .btns { display: flex; gap: 6px; justify-content: flex-end; }
+
+  footer { padding: 5px 12px; background: var(--panel); border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); display: flex; gap: 12px; }
+  footer .status.ok { color: var(--ok); }
+  footer .status.err { color: var(--danger); }
+  #busy { display: none; margin-left: auto; }
+  #busy.on { display: inline; }
+
+  @media (max-width: 760px) {
+    #sidebar { width: 120px; }
+    #editor { width: 220px; }
+    .thumb .actions { flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="title">📄 PDF 편집기</span>
+  <input type="file" id="file-input" accept="application/pdf,.pdf" hidden>
+  <button id="btn-open" title="PDF 파일 열기 (Ctrl+O)">📂 열기</button>
+  <span class="filename" id="filename">파일이 열려 있지 않습니다</span>
+  <span class="sep"></span>
+  <button id="btn-undo" disabled title="실행 취소 (Ctrl+Z)">↶ 실행 취소</button>
+  <button id="btn-redo" disabled title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>
+  <span class="sep"></span>
+  <button id="btn-addtext" disabled title="페이지를 클릭한 위치에 새 글을 씁니다">✏️ 글 추가</button>
+  <button id="btn-showblocks" disabled title="수정 가능한 텍스트 영역을 표시">🔲 텍스트 영역 표시</button>
+  <button id="btn-findreplace" disabled>🔁 찾아 바꾸기</button>
+  <span class="sep"></span>
+  <button id="btn-extract" disabled title="원하는 페이지만 뽑아 새 PDF 로 저장">✂️ 페이지 추출</button>
+  <span class="sep"></span>
+  <button id="btn-zoom-out" disabled>－</button>
+  <span id="zoom-label" style="min-width:44px;text-align:center">100%</span>
+  <button id="btn-zoom-in" disabled>＋</button>
+  <span class="spacer"></span>
+  <button id="btn-save" disabled title="원본 파일 위치에 덮어쓰기">💾 저장</button>
+  <button id="btn-download" class="primary" disabled>⬇️ 다운로드</button>
+</header>
+
+<main>
+  <aside id="sidebar">
+    <div class="side-head">
+      <span id="page-count">페이지</span>
+      <span style="flex:1"></span>
+      <button id="btn-select-all" title="모든 페이지 선택/해제">전체</button>
+      <button id="btn-delete-selected" class="danger" title="선택한 페이지 삭제">삭제</button>
+    </div>
+    <div id="thumbs"></div>
+  </aside>
+
+  <section id="viewer">
+    <div id="empty">
+      <h2>PDF 파일을 열어 시작하세요</h2>
+      글 수정 · 글 추가 · 페이지 순서 변경 · 페이지 추출
+      <div class="drop">
+        여기에 PDF 파일을 끌어다 놓거나<br>
+        <button class="primary" id="btn-open2" style="margin-top:10px">📂 파일 선택</button>
+      </div>
+    </div>
+    <div id="page-wrap">
+      <img id="page-img" alt="페이지">
+      <div id="overlay"></div>
+    </div>
+  </section>
+
+  <aside id="editor">
+    <h3 id="editor-title">텍스트 수정</h3>
+    <textarea id="editor-text" placeholder="내용을 입력하세요"></textarea>
+    <div class="row">
+      <label>크기</label><input type="number" id="editor-size" min="4" max="200" step="0.5" value="12">
+      <label>색상</label><input type="color" id="editor-color" value="#000000">
+    </div>
+    <div class="row" id="editor-width-row">
+      <label>줄바꿈 폭(pt)</label><input type="number" id="editor-width" min="0" step="10" placeholder="자동">
+    </div>
+    <div class="hint" id="editor-hint"></div>
+    <div class="btns">
+      <button class="primary" id="editor-apply">적용</button>
+      <button id="editor-delete" class="danger">텍스트 삭제</button>
+      <button id="editor-cancel">취소</button>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <span class="status" id="status">준비</span>
+  <span id="busy">처리 중…</span>
+</footer>
+
+<!-- 페이지 추출 대화상자 -->
+<div class="modal-bg" id="modal-extract">
+  <div class="modal">
+    <h3>✂️ 페이지 추출</h3>
+    <div class="row"><label style="width:70px">페이지</label><input type="text" id="extract-range" placeholder="예: 1-3, 5, 8-"></div>
+    <div class="hint">쉼표와 하이픈으로 범위를 지정합니다. 왼쪽 목록에서 체크한 페이지가 자동으로 채워집니다.<br>같은 페이지를 여러 번 적으면 그만큼 반복됩니다. "3-" 는 3페이지부터 끝까지입니다.</div>
+    <div class="row"><label style="width:70px">저장 경로</label><input type="text" id="extract-path" placeholder="비워두면 브라우저로 다운로드"></div>
+    <div class="btns">
+      <button id="extract-each">페이지별로 따로 저장</button>
+      <button class="primary" id="extract-go">추출</button>
+      <button id="extract-cancel">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 찾아 바꾸기 대화상자 -->
+<div class="modal-bg" id="modal-find">
+  <div class="modal">
+    <h3>🔁 찾아 바꾸기</h3>
+    <div class="row"><label style="width:70px">찾을 말</label><input type="text" id="find-text"></div>
+    <div class="row"><label style="width:70px">바꿀 말</label><input type="text" id="replace-text"></div>
+    <div class="hint">모든 페이지에서 찾을 말이 들어 있는 줄을 통째로 새 내용으로 다시 씁니다.</div>
+    <div class="btns">
+      <button class="primary" id="find-go">모두 바꾸기</button>
+      <button id="find-cancel">닫기</button>
+    </div>
+  </div>
+</div>
+
+<!-- 저장 경로 대화상자 -->
+<div class="modal-bg" id="modal-save">
+  <div class="modal">
+    <h3>💾 저장</h3>
+    <div class="row"><label style="width:70px">경로</label><input type="text" id="save-path" placeholder="/경로/파일이름.pdf"></div>
+    <div class="hint">이 컴퓨터의 경로에 직접 저장합니다. 브라우저로 내려받으려면 '다운로드'를 사용하세요.</div>
+    <div class="btns">
+      <button class="primary" id="save-go">저장</button>
+      <button id="save-cancel">닫기</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    docId: null, name: '', path: null, pages: [], current: 0, zoom: 1.0, version: 0,
+    addMode: false, showBlocks: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
+    editing: null, // {kind:'replace'|'add', bbox|x,y}
+  };
+  const RENDER_SCALE = 1.5; // 서버에 요청하는 기본 해상도 배율
+
+  // ------------------------------------------------------------ 유틸
+  function setStatus(msg, kind = '') { const el = $('status'); el.textContent = msg; el.className = 'status ' + kind; }
+  function busy(on) { $('busy').classList.toggle('on', on); }
+  async function api(path, opts = {}) {
+    busy(true);
+    try {
+      const res = await fetch(path, opts);
+      const ct = res.headers.get('content-type') || '';
+      if (!res.ok) {
+        let msg = res.statusText;
+        if (ct.includes('json')) { try { msg = (await res.json()).error || msg; } catch (e) {} }
+        throw new Error(msg);
+      }
+      if (ct.includes('json')) return res.json();
+      return res;
+    } finally { busy(false); }
+  }
+  function post(path, body) {
+    return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  }
+  function docUrl(rest) { return `/api/doc/${state.docId}${rest}`; }
+
+  // ------------------------------------------------------------ 문서 상태
+  function applyState(st) {
+    state.docId = st.id; state.name = st.name; state.path = st.path; state.pages = st.pages;
+    state.canUndo = st.can_undo; state.canRedo = st.can_redo; state.version++;
+    if (state.current >= state.pages.length) state.current = state.pages.length - 1;
+    if (state.current < 0) state.current = 0;
+    $('filename').textContent = st.name; $('filename').title = st.path || st.name;
+    $('page-count').textContent = `${st.page_count} 페이지`;
+    document.title = `${st.name} - PDF 편집기`;
+    for (const id of ['btn-addtext', 'btn-showblocks', 'btn-findreplace', 'btn-extract', 'btn-zoom-in', 'btn-zoom-out', 'btn-download', 'btn-save'])
+      $(id).disabled = false;
+    $('btn-undo').disabled = !state.canUndo; $('btn-redo').disabled = !state.canRedo;
+    $('empty').style.display = 'none'; $('page-wrap').style.display = 'block';
+    renderThumbs(); showPage(state.current);
+  }
+
+  async function openFile(file) {
+    const fd = new FormData(); fd.append('file', file);
+    try {
+      const st = await api('/api/open', { method: 'POST', body: fd });
+      state.current = 0; closeEditor(); applyState(st); setStatus(`열림: ${st.name} (${st.page_count}페이지)`, 'ok');
+    } catch (e) { setStatus('열기 실패: ' + e.message, 'err'); }
+  }
+
+  async function mutate(path, body, okMsg) {
+    try {
+      const st = await post(docUrl(path), body);
+      applyState(st);
+      if (okMsg) setStatus(okMsg, 'ok');
+      return st;
+    } catch (e) { setStatus('실패: ' + e.message, 'err'); throw e; }
+  }
+
+  // ------------------------------------------------------------ 썸네일 / 페이지 목록
+  function renderThumbs() {
+    const box = $('thumbs');
+    const checked = new Set([...box.querySelectorAll('input[type=checkbox]:checked')].map(c => +c.dataset.idx));
+    box.innerHTML = '';
+    state.pages.forEach((p, i) => {
+      const d = document.createElement('div');
+      d.className = 'thumb' + (i === state.current ? ' current' : '');
+      d.draggable = true; d.dataset.idx = i;
+      d.innerHTML = `
+        <img src="${docUrl(`/page/${i}/image?zoom=0.35&v=${state.version}`)}" alt="${i + 1}페이지" loading="lazy">
+        <div class="meta">
+          <label><input type="checkbox" data-idx="${i}" ${checked.has(i) ? 'checked' : ''}> ${i + 1}</label>
+          <div class="actions">
+            <button data-act="up" title="위로">▲</button>
+            <button data-act="down" title="아래로">▼</button>
+            <button data-act="rotate" title="90° 회전">⟳</button>
+            <button data-act="dup" title="페이지 복제">⧉</button>
+            <button data-act="del" title="페이지 삭제" class="danger">✕</button>
+          </div>
+        </div>`;
+      d.addEventListener('click', (ev) => {
+        if (ev.target.closest('button') || ev.target.closest('label')) return;
+        showPage(i);
+      });
+      d.querySelector('.actions').addEventListener('click', async (ev) => {
+        const b = ev.target.closest('button'); if (!b) return;
+        ev.stopPropagation();
+        const act = b.dataset.act;
+        if (act === 'up' && i > 0) { state.current = i - 1; await mutate('/move', { from: i, to: i - 1 }, `${i + 1}페이지를 위로 이동`); }
+        if (act === 'down' && i < state.pages.length - 1) { state.current = i + 1; await mutate('/move', { from: i, to: i + 1 }, `${i + 1}페이지를 아래로 이동`); }
+        if (act === 'rotate') { await mutate('/rotate', { page: i, degrees: 90 }, `${i + 1}페이지 회전`); }
+        if (act === 'dup') { await mutate('/duplicate', { page: i }, `${i + 1}페이지 복제`); }
+        if (act === 'del') {
+          if (state.pages.length <= 1) { setStatus('마지막 페이지는 삭제할 수 없습니다.', 'err'); return; }
+          if (!confirm(`${i + 1}페이지를 삭제할까요?`)) return;
+          await mutate('/delete', { pages: [i] }, `${i + 1}페이지 삭제`);
+        }
+      });
+      // 드래그 앤 드롭 순서 변경
+      d.addEventListener('dragstart', (ev) => { ev.dataTransfer.setData('text/plain', String(i)); ev.dataTransfer.effectAllowed = 'move'; d.classList.add('dragging'); });
+      d.addEventListener('dragend', () => d.classList.remove('dragging'));
+      d.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; d.classList.add('drag-over'); });
+      d.addEventListener('dragleave', () => d.classList.remove('drag-over'));
+      d.addEventListener('drop', async (ev) => {
+        ev.preventDefault(); d.classList.remove('drag-over');
+        const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
+        if (isNaN(from) || from === i) return;
+        const to = i;
+        state.current = to;
+        await mutate('/move', { from, to }, `${from + 1}페이지를 ${to + 1}번째 위치로 이동`);
+      });
+      box.appendChild(d);
+    });
+    const cur = box.querySelector('.thumb.current');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+  function selectedPages() {
+    return [...$('thumbs').querySelectorAll('input[type=checkbox]:checked')].map(c => +c.dataset.idx).sort((a, b) => a - b);
+  }
+  $('btn-select-all').addEventListener('click', () => {
+    const boxes = [...$('thumbs').querySelectorAll('input[type=checkbox]')];
+    const all = boxes.length && boxes.every(b => b.checked);
+    boxes.forEach(b => b.checked = !all);
+  });
+  $('btn-delete-selected').addEventListener('click', async () => {
+    const sel = selectedPages();
+    if (!sel.length) { setStatus('삭제할 페이지를 먼저 체크하세요.', 'err'); return; }
+    if (sel.length >= state.pages.length) { setStatus('모든 페이지를 삭제할 수는 없습니다.', 'err'); return; }
+    if (!confirm(`${sel.map(i => i + 1).join(', ')} 페이지를 삭제할까요?`)) return;
+    await mutate('/delete', { pages: sel }, `${sel.length}개 페이지 삭제`);
+  });
+
+  // ------------------------------------------------------------ 페이지 보기
+  async function showPage(i) {
+    state.current = i;
+    document.querySelectorAll('.thumb').forEach(t => t.classList.toggle('current', +t.dataset.idx === i));
+    const img = $('page-img');
+    const scale = RENDER_SCALE * state.zoom;
+    img.src = docUrl(`/page/${i}/image?zoom=${scale}&v=${state.version}`);
+    try {
+      const data = await api(docUrl(`/page/${i}/blocks`));
+      state.blocks = data.blocks; state.pageSize = { w: data.width, h: data.height };
+      const cssScale = 96 / 72 * state.zoom; // 1pt = 1.333px @100%
+      img.style.width = (data.width * cssScale) + 'px';
+      img.style.height = (data.height * cssScale) + 'px';
+      renderOverlay();
+    } catch (e) { setStatus('페이지 정보를 불러오지 못했습니다: ' + e.message, 'err'); }
+  }
+  function cssScale() { return 96 / 72 * state.zoom; }
+  function renderOverlay() {
+    const ov = $('overlay'); ov.innerHTML = '';
+    const s = cssScale();
+    state.blocks.forEach((b) => {
+      const [x0, y0, x1, y1] = b.bbox;
+      const el = document.createElement('div');
+      el.className = 'blk' + (state.editing && state.editing.kind === 'replace' && state.editing.id === b.id ? ' selected' : '');
+      el.style.left = (x0 * s) + 'px'; el.style.top = (y0 * s) + 'px';
+      el.style.width = Math.max(4, (x1 - x0) * s) + 'px'; el.style.height = Math.max(4, (y1 - y0) * s) + 'px';
+      el.title = b.text;
+      el.addEventListener('click', (ev) => { ev.stopPropagation(); if (state.addMode) return; beginReplace(b); });
+      ov.appendChild(el);
+    });
+  }
+  $('page-wrap').addEventListener('click', (ev) => {
+    if (!state.docId) return;
+    const rect = $('page-img').getBoundingClientRect();
+    const s = cssScale();
+    const x = (ev.clientX - rect.left) / s, y = (ev.clientY - rect.top) / s;
+    if (state.addMode) beginAdd(x, y);
+  });
+
+  function setZoom(z) {
+    state.zoom = Math.min(4, Math.max(0.25, z));
+    $('zoom-label').textContent = Math.round(state.zoom * 100) + '%';
+    if (state.docId) showPage(state.current);
+  }
+  $('btn-zoom-in').addEventListener('click', () => setZoom(state.zoom * 1.25));
+  $('btn-zoom-out').addEventListener('click', () => setZoom(state.zoom / 1.25));
+
+  // ------------------------------------------------------------ 텍스트 편집기
+  function openEditor() { $('editor').classList.add('open'); }
+  function closeEditor() { state.editing = null; $('editor').classList.remove('open'); renderOverlay(); }
+  function beginReplace(b) {
+    state.editing = { kind: 'replace', id: b.id, bbox: b.bbox };
+    $('editor-title').textContent = '✏️ 텍스트 수정';
+    $('editor-text').value = b.text; $('editor-size').value = b.font_size; $('editor-color').value = b.color;
+    $('editor-width-row').style.display = 'none'; $('editor-delete').style.display = '';
+    $('editor-hint').textContent = '기존 글자를 지우고 입력한 내용으로 다시 씁니다. 글자가 넘치면 크기가 자동으로 줄어듭니다.';
+    openEditor(); renderOverlay(); $('editor-text').focus();
+  }
+  function beginAdd(x, y) {
+    state.editing = { kind: 'add', x, y };
+    $('editor-title').textContent = `➕ 글 추가 (${Math.round(x)}, ${Math.round(y)} pt)`;
+    $('editor-text').value = ''; $('editor-size').value = 12; $('editor-color').value = '#000000';
+    $('editor-width-row').style.display = ''; $('editor-delete').style.display = 'none';
+    $('editor-hint').textContent = '클릭한 지점을 왼쪽 위 모서리로 하여 글을 씁니다. Enter 로 줄을 바꿀 수 있습니다.';
+    openEditor(); $('editor-text').focus();
+  }
+  $('editor-cancel').addEventListener('click', closeEditor);
+  $('editor-apply').addEventListener('click', async () => {
+    const ed = state.editing; if (!ed) return;
+    const text = $('editor-text').value;
+    const font_size = parseFloat($('editor-size').value) || 12;
+    const color = $('editor-color').value;
+    if (ed.kind === 'replace') {
+      await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text, font_size, color }, '텍스트를 수정했습니다.');
+    } else {
+      if (!text.trim()) { setStatus('추가할 내용을 입력하세요.', 'err'); return; }
+      const w = parseFloat($('editor-width').value) || null;
+      await mutate(`/page/${state.current}/add_text`, { x: ed.x, y: ed.y, text, font_size, color, max_width: w }, '텍스트를 추가했습니다.');
+    }
+    closeEditor();
+  });
+  $('editor-delete').addEventListener('click', async () => {
+    const ed = state.editing; if (!ed || ed.kind !== 'replace') return;
+    await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text: '' }, '텍스트를 삭제했습니다.');
+    closeEditor();
+  });
+  $('btn-addtext').addEventListener('click', () => {
+    state.addMode = !state.addMode;
+    $('btn-addtext').classList.toggle('active', state.addMode);
+    $('page-wrap').classList.toggle('addmode', state.addMode);
+    setStatus(state.addMode ? '글 추가 모드: 페이지에서 글을 넣을 위치를 클릭하세요.' : '글 추가 모드 해제');
+  });
+  $('btn-showblocks').addEventListener('click', () => {
+    state.showBlocks = !state.showBlocks;
+    $('btn-showblocks').classList.toggle('active', state.showBlocks);
+    $('page-wrap').classList.toggle('showblocks', state.showBlocks);
+  });
+
+  // ------------------------------------------------------------ 실행 취소
+  $('btn-undo').addEventListener('click', () => mutate('/undo', {}, '실행 취소'));
+  $('btn-redo').addEventListener('click', () => mutate('/redo', {}, '다시 실행'));
+
+  // ------------------------------------------------------------ 열기 / 저장 / 다운로드
+  $('btn-open').addEventListener('click', () => $('file-input').click());
+  $('btn-open2').addEventListener('click', () => $('file-input').click());
+  $('file-input').addEventListener('change', (ev) => { if (ev.target.files[0]) openFile(ev.target.files[0]); ev.target.value = ''; });
+  const viewer = $('viewer');
+  viewer.addEventListener('dragover', (ev) => { if ([...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); viewer.classList.add('drag-over'); } });
+  viewer.addEventListener('dragleave', () => viewer.classList.remove('drag-over'));
+  viewer.addEventListener('drop', (ev) => {
+    viewer.classList.remove('drag-over');
+    const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
+    if (f) { ev.preventDefault(); openFile(f); }
+  });
+  $('btn-download').addEventListener('click', () => { window.location.href = docUrl('/download'); setStatus('편집된 PDF 를 다운로드합니다.', 'ok'); });
+  $('btn-save').addEventListener('click', () => {
+    $('save-path').value = state.path || '';
+    $('modal-save').classList.add('open'); $('save-path').focus();
+  });
+  $('save-cancel').addEventListener('click', () => $('modal-save').classList.remove('open'));
+  $('save-go').addEventListener('click', async () => {
+    const path = $('save-path').value.trim();
+    if (!path) { setStatus('저장 경로를 입력하세요.', 'err'); return; }
+    try {
+      const r = await post(docUrl('/save'), { path });
+      $('modal-save').classList.remove('open'); state.path = r.path; setStatus('저장 완료: ' + r.path, 'ok');
+    } catch (e) { setStatus('저장 실패: ' + e.message, 'err'); }
+  });
+
+  // ------------------------------------------------------------ 페이지 추출
+  function rangeFromSelection() {
+    const sel = selectedPages();
+    if (!sel.length) return '';
+    const parts = []; let start = sel[0], prev = sel[0];
+    for (let k = 1; k <= sel.length; k++) {
+      const v = sel[k];
+      if (v === prev + 1) { prev = v; continue; }
+      parts.push(start === prev ? `${start + 1}` : `${start + 1}-${prev + 1}`);
+      start = v; prev = v;
+    }
+    return parts.join(', ');
+  }
+  $('btn-extract').addEventListener('click', () => {
+    $('extract-range').value = rangeFromSelection() || `${state.current + 1}`;
+    $('modal-extract').classList.add('open'); $('extract-range').focus();
+  });
+  $('extract-cancel').addEventListener('click', () => $('modal-extract').classList.remove('open'));
+  $('extract-go').addEventListener('click', async () => {
+    const range = $('extract-range').value.trim();
+    const path = $('extract-path').value.trim();
+    if (!range) { setStatus('추출할 페이지 범위를 입력하세요.', 'err'); return; }
+    try {
+      const res = await post(docUrl('/extract'), { range, path: path || undefined });
+      if (path) { setStatus(`추출 완료 (${res.count}페이지): ${res.path}`, 'ok'); }
+      else {
+        const blob = await res.blob();
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+        a.download = (state.name.replace(/\.pdf$/i, '') || 'document') + '_pages.pdf'; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+        setStatus(`페이지 ${range} 를 추출하여 다운로드합니다.`, 'ok');
+      }
+      $('modal-extract').classList.remove('open');
+    } catch (e) { setStatus('추출 실패: ' + e.message, 'err'); }
+  });
+  $('extract-each').addEventListener('click', async () => {
+    const range = $('extract-range').value.trim();
+    const folder = $('extract-path').value.trim();
+    if (!folder) { setStatus('페이지별 저장은 저장 경로(폴더)가 필요합니다.', 'err'); return; }
+    try {
+      const r = await post(docUrl('/extract_each'), { range, folder });
+      setStatus(`${r.files.length}개 파일 저장: ${folder}`, 'ok'); $('modal-extract').classList.remove('open');
+    } catch (e) { setStatus('추출 실패: ' + e.message, 'err'); }
+  });
+
+  // ------------------------------------------------------------ 찾아 바꾸기
+  $('btn-findreplace').addEventListener('click', () => { $('modal-find').classList.add('open'); $('find-text').focus(); });
+  $('find-cancel').addEventListener('click', () => $('modal-find').classList.remove('open'));
+  $('find-go').addEventListener('click', async () => {
+    const find = $('find-text').value, replace = $('replace-text').value;
+    if (!find) { setStatus('찾을 말을 입력하세요.', 'err'); return; }
+    try {
+      const st = await post(docUrl('/find_replace'), { find, replace });
+      applyState(st); $('modal-find').classList.remove('open'); setStatus(`${st.count}곳을 바꿨습니다.`, st.count ? 'ok' : '');
+    } catch (e) { setStatus('실패: ' + e.message, 'err'); }
+  });
+
+  // ------------------------------------------------------------ 키보드
+  document.addEventListener('keydown', (ev) => {
+    const inField = ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName);
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'o') { ev.preventDefault(); $('file-input').click(); return; }
+    if (!state.docId) return;
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !inField) { ev.preventDefault(); if (state.canUndo) mutate('/undo', {}, '실행 취소'); }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'y' && !inField) { ev.preventDefault(); if (state.canRedo) mutate('/redo', {}, '다시 실행'); }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && state.editing) { ev.preventDefault(); $('editor-apply').click(); }
+    if (ev.key === 'Escape') { closeEditor(); document.querySelectorAll('.modal-bg.open').forEach(m => m.classList.remove('open')); }
+    if (!inField && ev.key === 'PageDown' && state.current < state.pages.length - 1) { ev.preventDefault(); showPage(state.current + 1); }
+    if (!inField && ev.key === 'PageUp' && state.current > 0) { ev.preventDefault(); showPage(state.current - 1); }
+  });
+
+  // ------------------------------------------------------------ 시작 시 열려 있는 문서
+  fetch('/api/initial').then(r => r.json()).then(st => { if (st && st.id) { applyState(st); setStatus(`열림: ${st.name}`, 'ok'); } }).catch(() => {});
+})();
+</script>
+</body>
+</html>
