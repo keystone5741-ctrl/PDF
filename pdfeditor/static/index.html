@@ -9,7 +9,17 @@
   :root {
     --bg: #f3f4f6; --panel: #ffffff; --border: #d1d5db; --text: #111827; --muted: #6b7280;
     --accent: #2563eb; --accent-soft: rgba(37, 99, 235, .12); --danger: #dc2626; --ok: #059669;
+    --input-bg: #ffffff; --thumb-bg: #fafafa; --shadow: rgba(0,0,0,.25);
+    color-scheme: light;
   }
+  html[data-theme="dark"] {
+    --bg: #0f172a; --panel: #1e293b; --border: #334155; --text: #e5e7eb; --muted: #94a3b8;
+    --accent: #60a5fa; --accent-soft: rgba(96, 165, 250, .18); --danger: #f87171; --ok: #34d399;
+    --input-bg: #0f172a; --thumb-bg: #162033; --shadow: rgba(0,0,0,.6);
+    color-scheme: dark;
+  }
+  html[data-theme="dark"] button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  html[data-theme="dark"] button.primary:hover:not(:disabled) { background: #1d4ed8; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
@@ -29,7 +39,7 @@
   button.danger { color: var(--danger); }
   button.danger:hover:not(:disabled) { border-color: var(--danger); }
   input[type=text], input[type=number], textarea, select {
-    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: #fff; color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: var(--input-bg); color: var(--text);
   }
   input[type=number] { width: 64px; }
 
@@ -50,7 +60,7 @@
   #sidebar .side-head button { padding: 3px 6px; font-size: 12px; }
   #thumbs { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .thumb {
-    border: 2px solid var(--border); border-radius: 8px; background: #fafafa; padding: 6px; cursor: pointer; position: relative; user-select: none;
+    border: 2px solid var(--border); border-radius: 8px; background: var(--thumb-bg); padding: 6px; cursor: pointer; position: relative; user-select: none;
   }
   .thumb:hover { border-color: #9ca3af; }
   .thumb.current { border-color: var(--accent); background: var(--accent-soft); }
@@ -63,7 +73,7 @@
   .thumb .actions button { padding: 1px 5px; font-size: 11px; line-height: 1.4; border-radius: 4px; }
 
   #viewer { flex: 1; overflow: auto; position: relative; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
-  #page-wrap { position: relative; box-shadow: 0 2px 12px rgba(0,0,0,.25); background: #fff; display: none; }
+  #page-wrap { position: relative; box-shadow: 0 2px 12px var(--shadow); background: #fff; display: none; }
   #page-wrap.addmode { cursor: crosshair; }
   #page-img { display: block; }
   #overlay { position: absolute; inset: 0; }
@@ -82,12 +92,13 @@
 
   /* 페이지 위에 바로 뜨는 텍스트 상자 편집기 */
   #ie {
-    position: absolute; display: none; z-index: 20; border: 1.5px solid var(--accent); background: rgba(255,255,255,.92);
-    box-shadow: 0 0 0 1px rgba(255,255,255,.9), 0 4px 16px rgba(0,0,0,.18); box-sizing: content-box;
+    position: absolute; display: none; z-index: 20; border: 1.5px solid var(--accent); background: transparent;
+    box-shadow: 0 0 0 1px rgba(255,255,255,.6); box-sizing: content-box;
   }
   #ie.open { display: block; }
   #ie textarea {
-    display: block; width: 100%; height: 100%; margin: 0; padding: 0; border: none; outline: none; resize: none; background: transparent;
+    display: block; width: 100%; height: 100%; margin: 0; padding: 0; border: none; outline: none; resize: none; background: transparent; color-scheme: light;
+    caret-color: #2563eb;
     overflow: hidden; line-height: 1.2; white-space: pre-wrap; word-break: break-word;
     font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Droid Sans Fallback", sans-serif;
   }
@@ -104,9 +115,12 @@
     font-size: 12px; color: var(--muted); z-index: 21;
   }
   #ie .ie-tools input[type=number] { width: 58px; padding: 3px 6px; }
-  #ie .ie-tools input[type=color] { width: 32px; height: 26px; padding: 0 2px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+  #ie .ie-tools input[type=color] { width: 32px; height: 26px; padding: 0 2px; border: 1px solid var(--border); border-radius: 5px; background: var(--input-bg); }
   #ie .ie-tools button { padding: 3px 9px; font-size: 12px; }
   #ie.above .ie-tools { top: auto; bottom: calc(100% + 32px); }
+  /* 수정 모드: 원래 글자가 비치지 않도록 그 자리만 페이지 배경색으로 가림 */
+  #ie-cover { position: absolute; display: none; z-index: 19; background: #fff; }
+  #ie-cover.open { display: block; }
 
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 50; }
   .modal-bg.open { display: flex; }
@@ -149,6 +163,7 @@
   <span id="zoom-label" style="min-width:44px;text-align:center">100%</span>
   <button id="btn-zoom-in" disabled>＋</button>
   <span class="spacer"></span>
+  <button id="btn-theme" title="밝은 화면 / 어두운 화면 전환">🌙 다크</button>
   <button id="btn-save" disabled title="원본 파일 위치에 덮어쓰기">💾 저장</button>
   <button id="btn-download" class="primary" disabled>⬇️ 다운로드</button>
 </header>
@@ -177,6 +192,7 @@
       <img id="page-img" alt="페이지">
       <div id="overlay"></div>
       <!-- 페이지 위에 바로 뜨는 텍스트 상자 -->
+      <div id="ie-cover"></div>
       <div id="ie">
         <div class="ie-move" title="끌어서 옮기기"><span>✥</span><span id="ie-title">글 추가</span></div>
         <textarea id="ie-text" placeholder="내용을 입력하세요" spellcheck="false"></textarea>
@@ -434,7 +450,16 @@
   const ie = $('ie'), ieText = $('ie-text');
   const MIN_W = 24, MIN_H = 10; // pt
 
-  function closeEditor() { state.editing = null; ie.classList.remove('open'); renderOverlay(); }
+  const ieCover = $('ie-cover');
+  function closeEditor() { state.editing = null; ie.classList.remove('open'); ieCover.classList.remove('open'); renderOverlay(); }
+  function layoutCover() {
+    const ed = state.editing;
+    if (!ed || ed.kind !== 'replace') { ieCover.classList.remove('open'); return; }
+    const s = cssScale(); const [x0, y0, x1, y1] = ed.bbox;
+    ieCover.style.left = (x0 * s - 1) + 'px'; ieCover.style.top = (y0 * s - 1) + 'px';
+    ieCover.style.width = ((x1 - x0) * s + 2) + 'px'; ieCover.style.height = ((y1 - y0) * s + 2) + 'px';
+    ieCover.classList.add('open');
+  }
 
   function layoutEditor() {
     const ed = state.editing; if (!ed) return;
@@ -465,7 +490,7 @@
     $('ie-title').textContent = ed.kind === 'add' ? '글 추가' : '글 수정';
     $('ie-delete').style.display = ed.kind === 'replace' ? '' : 'none';
     ie.classList.add('open');
-    layoutEditor(); growToFit(); renderOverlay();
+    layoutEditor(); layoutCover(); growToFit(); renderOverlay();
     ieText.focus();
     if (ed.kind === 'replace') ieText.select();
   }
@@ -692,6 +717,20 @@
       applyState(st); $('modal-find').classList.remove('open'); setStatus(`${st.count}곳을 바꿨습니다.`, st.count ? 'ok' : '');
     } catch (e) { setStatus('실패: ' + e.message, 'err'); }
   });
+
+  // ------------------------------------------------------------ 테마 (밝게/어둡게)
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    $('btn-theme').textContent = t === 'dark' ? '☀️ 라이트' : '🌙 다크';
+    try { localStorage.setItem('theme', t); } catch (e) {}
+  }
+  (() => {
+    let t = null;
+    try { t = localStorage.getItem('theme'); } catch (e) {}
+    if (!t) t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    applyTheme(t);
+  })();
+  $('btn-theme').addEventListener('click', () => applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 
   // ------------------------------------------------------------ 키보드
   document.addEventListener('keydown', (ev) => {
