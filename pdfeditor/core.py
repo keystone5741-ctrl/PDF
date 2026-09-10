@@ -28,6 +28,14 @@ FONT_NAME = "PDFEditorCJK"
 _FALLBACK_FONT: pymupdf.Font | None = None
 
 MAX_UNDO = 15  # 실행 취소 사본 개수 (문서 전체 사본이라 너무 크게 잡으면 메모리를 많이 씀)
+UNREADABLE = "\ufffd"  # 폰트에 유니코드 매핑이 없어 읽지 못한 글자
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]")
+
+
+def _clean_unreadable(text: str) -> tuple[str, bool]:
+    """읽을 수 없는 글자(U+FFFD, 제어 문자)를 제거하고, 있었는지 여부를 함께 돌려줍니다."""
+    cleaned = _CONTROL_CHARS.sub("", text)
+    return cleaned, cleaned != text
 LINE_HEIGHT = 1.2  # 삽입하는 텍스트의 줄 간격 (글자 크기 배수). 화면 편집 상자와 동일하게 유지.
 
 
@@ -106,6 +114,8 @@ class TextBlock:
     font_size: float
     color: str  # '#rrggbb'
     lines: list[str] = field(default_factory=list)
+    # 원본 폰트에 글자 정보가 없어 읽을 수 없는 글자(U+FFFD)가 섞여 있었는지. 읽을 수 없는 부분은 text 에서 뺍니다.
+    unreadable: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -132,6 +142,9 @@ class PDFEditor:
         self._page_keys: list[str] = [self._new_key() for _ in range(self.doc.page_count)]
         # PyMuPDF 는 스레드 안전하지 않으므로 문서 단위로 모든 작업을 직렬화합니다.
         self.lock = threading.RLock()
+        # 삽입용 폰트 리소스 이름. 저장 시 서브셋된 폰트가 같은 이름으로 파일에 남아 있으면 그 폰트를
+        # 재사용해 새 글자가 보이지 않게 되므로, 문서를 열 때마다 새 이름을 씁니다.
+        self._font_name = f"{FONT_NAME}{uuid.uuid4().hex[:6]}"
 
     # ------------------------------------------------------------------ 페이지 키
     @staticmethod
@@ -240,14 +253,18 @@ class PDFEditor:
             rect = para["rect"] * rot
             rect.normalize()
             r, g, b = _int_to_rgb(para["color"])
+            cleaned = [_clean_unreadable(ln) for ln in para["lines"]]
+            unreadable = any(bad for _, bad in cleaned)
+            lines = [ln.rstrip() for ln, _ in cleaned]
             blocks.append(
                 TextBlock(
                     id=len(blocks),
                     bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                    text="\n".join(para["lines"]),
+                    text="\n".join(lines).strip("\n"),
                     font_size=round(para["size"], 2) or 11.0,
                     color="#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255)),
-                    lines=para["lines"],
+                    lines=lines,
+                    unreadable=unreadable,
                 )
             )
         return blocks
@@ -305,8 +322,8 @@ class PDFEditor:
 
     # ------------------------------------------------------------------ 텍스트 쓰기
     def _ensure_font(self, page: pymupdf.Page) -> str:
-        page.insert_font(fontname=FONT_NAME, fontbuffer=_fallback_font().buffer)
-        return FONT_NAME
+        page.insert_font(fontname=self._font_name, fontbuffer=_fallback_font().buffer)
+        return self._font_name
 
     def add_text(
         self,
@@ -601,8 +618,16 @@ class PDFEditor:
         return path
 
     def to_bytes(self) -> bytes:
-        self._subset_fonts()
-        return self.doc.tobytes(garbage=3, deflate=True)
+        """저장용 바이트. 폰트 서브셋은 사본에만 적용해 편집 중인 문서의 폰트는 온전히 유지합니다."""
+        copy = pymupdf.open(stream=self.doc.tobytes(), filetype="pdf")
+        try:
+            try:
+                copy.subset_fonts()
+            except Exception:  # pragma: no cover - 서브셋 실패는 치명적이지 않음
+                pass
+            return copy.tobytes(garbage=3, deflate=True)
+        finally:
+            copy.close()
 
     def save(self, path: str | Path | None = None) -> Path:
         """path 를 생략하면 원본 파일 위치에 덮어씁니다."""
@@ -612,13 +637,6 @@ class PDFEditor:
         target.write_bytes(self.to_bytes())
         self.path = target
         return target
-
-    def _subset_fonts(self) -> None:
-        """추가한 폴백 폰트(3MB+)를 실제로 쓰인 글자만 남기고 줄입니다."""
-        try:
-            self.doc.subset_fonts()
-        except Exception:  # pragma: no cover - 서브셋 실패는 치명적이지 않음
-            pass
 
     # ------------------------------------------------------------------ 기타
     def __enter__(self) -> "PDFEditor":
