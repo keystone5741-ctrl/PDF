@@ -56,10 +56,31 @@ def test_text_blocks_split_by_gap_and_merge_paragraph(ed):
     texts = [b.text for b in blocks]
     assert "Title 1" in texts
     assert "Right" in texts
-    body = next(b for b in blocks if b.text.startswith("Body of page 1"))
-    assert len(body.lines) > 1  # 여러 줄이 하나의 문단으로 묶임
+    # 기본은 줄 단위: 본문의 각 줄이 따로 나옴
+    body_lines = [b for b in blocks if b.text.startswith("Body of page 1")]
+    assert len(body_lines) >= 2 and all(len(b.lines) == 1 for b in body_lines)
+    # 문단 묶기를 켜면 하나로 합쳐짐
+    merged = ed.get_text_blocks(0, merge_paragraphs=True)
+    body = next(b for b in merged if b.text.startswith("Body of page 1"))
+    assert len(body.lines) > 1
     assert body.font_size == 11.0
     assert body.color == "#000000"
+
+
+def test_merge_does_not_join_lines_with_different_size_or_indent():
+    doc = pymupdf.open()
+    p = doc.new_page()
+    p.insert_text((72, 100), "vacancy", fontsize=11)
+    p.insert_text((72, 114), "1. vacant position", fontsize=11)
+    p.insert_text((120, 128), "2. vacant room", fontsize=11)   # 들여쓰기 다름
+    p.insert_text((72, 142), "Big title", fontsize=18)           # 크기 다름
+    ed = PDFEditor(doc.tobytes())
+    merged = ed.get_text_blocks(0, merge_paragraphs=True)
+    texts = [b.text for b in merged]
+    assert "2. vacant room" in texts and "Big title" in texts
+    assert any(t.startswith("vacancy") for t in texts)
+    assert not any("2. vacant room" in t and "vacancy" in t for t in texts)
+    assert not any("Big title" in t and "vacancy" in t for t in texts)
 
 
 # ---------------------------------------------------------------- 텍스트 편집
@@ -100,7 +121,7 @@ def test_add_text_korean(ed):
 
 def test_add_text_wraps_within_width(ed):
     ed.add_text(0, 72, 600, "word " * 40, font_size=12, max_width=150)
-    blk = next(b for b in ed.get_text_blocks(0) if b.bbox[1] >= 599)
+    blk = next(b for b in ed.get_text_blocks(0, merge_paragraphs=True) if b.bbox[1] >= 599)
     assert blk.bbox[2] <= 72 + 150 + 1
     assert len(blk.lines) > 1
 
@@ -108,7 +129,7 @@ def test_add_text_wraps_within_width(ed):
 def test_add_text_with_box_height_keeps_font_and_grows(ed):
     # 상자가 너무 작아도 글자 크기는 유지하고 아래로 늘려서 넣는다
     ed.add_text(0, 72, 600, "첫 줄\n둘째 줄\n셋째 줄", font_size=14, max_width=200, height=10)
-    blk = next(b for b in ed.get_text_blocks(0) if "첫 줄" in b.text)
+    blk = next(b for b in ed.get_text_blocks(0, merge_paragraphs=True) if "첫 줄" in b.text)
     assert blk.font_size == 14.0 and len(blk.lines) == 3
 
 

@@ -199,11 +199,12 @@ class PDFEditor:
         return pix.tobytes(fmt)
 
     # ------------------------------------------------------------------ 텍스트 읽기
-    def get_text_blocks(self, index: int) -> list[TextBlock]:
-        """페이지의 편집 가능한 텍스트 블록(문단) 목록.
+    def get_text_blocks(self, index: int, merge_paragraphs: bool = False) -> list[TextBlock]:
+        """페이지의 편집 가능한 텍스트 블록 목록.
 
-        PyMuPDF 는 같은 줄에 있는 텍스트를 멀리 떨어져 있어도 한 블록으로 묶으므로,
-        큰 가로 간격은 잘라내고, 세로로 붙어 있는 줄들만 하나의 문단으로 다시 묶습니다.
+        PyMuPDF 는 같은 줄에 있는 텍스트를 멀리 떨어져 있어도 한 블록으로 묶으므로 큰 가로 간격은
+        잘라냅니다. 기본은 줄 단위이고, merge_paragraphs=True 면 글자 크기와 왼쪽 정렬이 같고
+        세로로 붙어 있는 줄들을 하나의 문단으로 묶습니다.
         """
         page = self._page(index)
         rot = page.rotation_matrix
@@ -229,21 +230,23 @@ class PDFEditor:
                     segments.append(_segment_from_spans(bno, cur_spans))
         segments = [sg for sg in segments if sg[2].strip()]
 
-        # 2) 세로로 인접하고 가로로 겹치는 조각들을 문단으로 병합
+        # 2) (선택) 같은 문단으로 보이는 조각들을 병합: 같은 MuPDF 블록, 비슷한 글자 크기, 왼쪽 정렬이 같고 세로로 붙어 있음
         paragraphs: list[dict] = []
         for bno, rect, text, size, color in segments:
             merged = False
-            for para in paragraphs:
-                if para["bno"] != bno:
-                    continue
-                pr: pymupdf.Rect = para["rect"]
-                v_gap = rect.y0 - pr.y1
-                h_overlap = min(rect.x1, pr.x1) - max(rect.x0, pr.x0)
-                if -size * 0.3 <= v_gap <= max(size, para["size"]) * 0.9 and h_overlap > 0:
-                    para["rect"] |= rect
-                    para["lines"].append(text.rstrip())
-                    merged = True
-                    break
+            if merge_paragraphs:
+                for para in paragraphs:
+                    if para["bno"] != bno:
+                        continue
+                    pr: pymupdf.Rect = para["rect"]
+                    v_gap = rect.y0 - pr.y1
+                    same_size = abs(size - para["size"]) <= 0.6
+                    same_left = abs(rect.x0 - pr.x0) <= size * 1.5
+                    if same_size and same_left and -size * 0.3 <= v_gap <= size * 0.9:
+                        para["rect"] |= rect
+                        para["lines"].append(text.rstrip())
+                        merged = True
+                        break
             if not merged:
                 paragraphs.append({"bno": bno, "rect": pymupdf.Rect(rect), "lines": [text.rstrip()], "size": size, "color": color})
 

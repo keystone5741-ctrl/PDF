@@ -107,7 +107,7 @@ def cmd_replace(args):
 
 def cmd_blocks(args):
     ed = PDFEditor(args.file)
-    for b in ed.get_text_blocks(args.page - 1):
+    for b in ed.get_text_blocks(args.page - 1, merge_paragraphs=args.merge):
         x0, y0, x1, y1 = b.bbox
         preview = b.text.replace("\n", " ⏎ ")
         print(f"[{b.id}] ({x0:.0f},{y0:.0f})-({x1:.0f},{y1:.0f}) {b.font_size}pt {b.color}: {preview}")
@@ -192,6 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("blocks", help="페이지의 텍스트 블록 목록")
     s.add_argument("file")
     s.add_argument("page", type=int)
+    s.add_argument("--merge", action="store_true", help="붙어 있는 줄을 문단으로 묶어서 보기")
     s.set_defaults(func=cmd_blocks)
 
     s = sub.add_parser("edit-block", help="블록 번호로 텍스트 수정")
