@@ -55,6 +55,19 @@ def test_replace_add_and_undo(client):
     assert "추가" not in client.get(f"/api/doc/{d}/page/0/text").get_json()["text"]
 
 
+def test_add_text_box_and_replace_target(client):
+    d = open_doc(client)["id"]
+    r = client.post(f"/api/doc/{d}/page/0/add_text", json={"x": 72, "y": 500, "text": "상자", "max_width": 100, "height": 20})
+    assert r.status_code == 200
+    blk = client.get(f"/api/doc/{d}/page/0/blocks").get_json()["blocks"][0]
+    r = client.post(f"/api/doc/{d}/page/0/replace", json={"bbox": blk["bbox"], "text": "이동", "new_bbox": [300, 600, 400, 620]})
+    assert r.status_code == 200
+    moved = next(b for b in client.get(f"/api/doc/{d}/page/0/blocks").get_json()["blocks"] if b["text"] == "이동")
+    assert abs(moved["bbox"][0] - 300) < 3
+    r = client.post(f"/api/doc/{d}/page/0/replace", json={"bbox": blk["bbox"], "text": "x", "new_bbox": [1, 2]})
+    assert r.status_code == 400
+
+
 def test_reorder_move_delete_rotate(client):
     d = open_doc(client)["id"]
     assert client.post(f"/api/doc/{d}/reorder", json={"order": [2, 1, 0]}).status_code == 200

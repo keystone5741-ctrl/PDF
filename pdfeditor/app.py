@@ -166,12 +166,16 @@ def create_app(initial_file: str | None = None) -> Flask:
         bbox = body.get("bbox")
         if not bbox or len(bbox) != 4:
             abort(400, "bbox 가 필요합니다.")
+        new_bbox = body.get("new_bbox")
+        if new_bbox is not None and len(new_bbox) != 4:
+            abort(400, "new_bbox 는 숫자 4개여야 합니다.")
         ed.replace_text(
             page,
             [float(v) for v in bbox],
             body.get("text", ""),
             float(body["font_size"]) if body.get("font_size") else None,
             body.get("color") or "#000000",
+            target_bbox=[float(v) for v in new_bbox] if new_bbox else None,
         )
         return jsonify(doc_state(doc_id))
 
@@ -190,6 +194,7 @@ def create_app(initial_file: str | None = None) -> Flask:
             float(body.get("font_size") or 12),
             body.get("color") or "#000000",
             float(body["max_width"]) if body.get("max_width") else None,
+            float(body["height"]) if body.get("height") else None,
         )
         return jsonify({**doc_state(doc_id), "rect": rect})
 

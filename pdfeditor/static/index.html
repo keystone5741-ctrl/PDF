@@ -80,16 +80,33 @@
   #empty .drop { border: 2px dashed var(--border); border-radius: 12px; padding: 32px; margin-top: 16px; background: var(--panel); }
   #viewer.drag-over #empty .drop { border-color: var(--accent); background: var(--accent-soft); }
 
-  #editor {
-    width: 300px; background: var(--panel); border-left: 1px solid var(--border); padding: 12px; display: none; flex-direction: column; gap: 10px; overflow-y: auto;
+  /* 페이지 위에 바로 뜨는 텍스트 상자 편집기 */
+  #ie {
+    position: absolute; display: none; z-index: 20; border: 1.5px solid var(--accent); background: rgba(255,255,255,.92);
+    box-shadow: 0 0 0 1px rgba(255,255,255,.9), 0 4px 16px rgba(0,0,0,.18); box-sizing: content-box;
   }
-  #editor.open { display: flex; }
-  #editor h3 { margin: 0; font-size: 15px; }
-  #editor textarea { width: 100%; min-height: 140px; resize: vertical; line-height: 1.5; }
-  #editor .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  #editor .row label { color: var(--muted); font-size: 12px; }
-  #editor .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
-  #editor .btns { display: flex; gap: 6px; flex-wrap: wrap; }
+  #ie.open { display: block; }
+  #ie textarea {
+    display: block; width: 100%; height: 100%; margin: 0; padding: 0; border: none; outline: none; resize: none; background: transparent;
+    overflow: hidden; line-height: 1.2; white-space: pre-wrap; word-break: break-word;
+    font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", "Droid Sans Fallback", sans-serif;
+  }
+  #ie .ie-move {
+    position: absolute; left: -1.5px; top: -24px; height: 20px; padding: 0 7px; display: flex; align-items: center; gap: 4px;
+    background: var(--accent); color: #fff; font-size: 11px; border-radius: 5px 5px 0 0; cursor: move; user-select: none; white-space: nowrap;
+  }
+  #ie .ie-resize {
+    position: absolute; right: -7px; bottom: -7px; width: 13px; height: 13px; background: #fff; border: 2px solid var(--accent); border-radius: 3px; cursor: nwse-resize;
+  }
+  #ie .ie-tools {
+    position: absolute; left: -1.5px; top: calc(100% + 10px); display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.15); white-space: nowrap;
+    font-size: 12px; color: var(--muted); z-index: 21;
+  }
+  #ie .ie-tools input[type=number] { width: 58px; padding: 3px 6px; }
+  #ie .ie-tools input[type=color] { width: 32px; height: 26px; padding: 0 2px; border: 1px solid var(--border); border-radius: 5px; background: #fff; }
+  #ie .ie-tools button { padding: 3px 9px; font-size: 12px; }
+  #ie.above .ie-tools { top: auto; bottom: calc(100% + 32px); }
 
   .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 50; }
   .modal-bg.open { display: flex; }
@@ -108,7 +125,6 @@
 
   @media (max-width: 760px) {
     #sidebar { width: 120px; }
-    #editor { width: 220px; }
     .thumb .actions { flex-wrap: wrap; }
   }
 </style>
@@ -160,26 +176,21 @@
     <div id="page-wrap">
       <img id="page-img" alt="페이지">
       <div id="overlay"></div>
+      <!-- 페이지 위에 바로 뜨는 텍스트 상자 -->
+      <div id="ie">
+        <div class="ie-move" title="끌어서 옮기기"><span>✥</span><span id="ie-title">글 추가</span></div>
+        <textarea id="ie-text" placeholder="내용을 입력하세요" spellcheck="false"></textarea>
+        <div class="ie-resize" title="끌어서 상자 크기 조절"></div>
+        <div class="ie-tools">
+          <span>크기</span><input type="number" id="ie-size" min="4" max="200" step="0.5" value="12">
+          <span>색상</span><input type="color" id="ie-color" value="#000000">
+          <button class="primary" id="ie-apply" title="Ctrl+Enter">적용</button>
+          <button class="danger" id="ie-delete">삭제</button>
+          <button id="ie-cancel" title="Esc">취소</button>
+        </div>
+      </div>
     </div>
   </section>
-
-  <aside id="editor">
-    <h3 id="editor-title">텍스트 수정</h3>
-    <textarea id="editor-text" placeholder="내용을 입력하세요"></textarea>
-    <div class="row">
-      <label>크기</label><input type="number" id="editor-size" min="4" max="200" step="0.5" value="12">
-      <label>색상</label><input type="color" id="editor-color" value="#000000">
-    </div>
-    <div class="row" id="editor-width-row">
-      <label>줄바꿈 폭(pt)</label><input type="number" id="editor-width" min="0" step="10" placeholder="자동">
-    </div>
-    <div class="hint" id="editor-hint"></div>
-    <div class="btns">
-      <button class="primary" id="editor-apply">적용</button>
-      <button id="editor-delete" class="danger">텍스트 삭제</button>
-      <button id="editor-cancel">취소</button>
-    </div>
-  </aside>
 </main>
 
 <footer>
@@ -235,7 +246,7 @@
   const state = {
     docId: null, name: '', path: null, pages: [], current: 0, zoom: 1.0, version: 0,
     addMode: false, showBlocks: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
-    editing: null, // {kind:'replace'|'add', bbox|x,y}
+    editing: null, // {kind:'replace'|'add', id?, bbox?(원본 영역), x, y, w, h (pt 단위 상자)}
   };
   const RENDER_SCALE = 1.5; // 서버에 요청하는 기본 해상도 배율
 
@@ -394,12 +405,16 @@
       el.style.left = (x0 * s) + 'px'; el.style.top = (y0 * s) + 'px';
       el.style.width = Math.max(4, (x1 - x0) * s) + 'px'; el.style.height = Math.max(4, (y1 - y0) * s) + 'px';
       el.title = b.text;
-      el.addEventListener('click', (ev) => { ev.stopPropagation(); if (state.addMode) return; beginReplace(b); });
+      el.addEventListener('click', (ev) => {
+        if (state.addMode || state.editing) return; // 글 추가 모드/편집 중에는 페이지 클릭으로 처리
+        ev.stopPropagation(); beginReplace(b);
+      });
       ov.appendChild(el);
     });
   }
   $('page-wrap').addEventListener('click', (ev) => {
-    if (!state.docId) return;
+    if (!state.docId || ev.target.closest('#ie')) return;
+    if (state.editing) return; // 편집 중에는 적용/취소로 먼저 끝내야 함
     const rect = $('page-img').getBoundingClientRect();
     const s = cssScale();
     const x = (ev.clientX - rect.left) / s, y = (ev.clientY - rect.top) / s;
@@ -407,6 +422,7 @@
   });
 
   function setZoom(z) {
+    closeEditor();
     state.zoom = Math.min(4, Math.max(0.25, z));
     $('zoom-label').textContent = Math.round(state.zoom * 100) + '%';
     if (state.docId) showPage(state.current);
@@ -414,44 +430,115 @@
   $('btn-zoom-in').addEventListener('click', () => setZoom(state.zoom * 1.25));
   $('btn-zoom-out').addEventListener('click', () => setZoom(state.zoom / 1.25));
 
-  // ------------------------------------------------------------ 텍스트 편집기
-  function openEditor() { $('editor').classList.add('open'); }
-  function closeEditor() { state.editing = null; $('editor').classList.remove('open'); renderOverlay(); }
+  // ------------------------------------------------------------ 페이지 위 텍스트 상자 편집기
+  const ie = $('ie'), ieText = $('ie-text');
+  const MIN_W = 24, MIN_H = 10; // pt
+
+  function closeEditor() { state.editing = null; ie.classList.remove('open'); renderOverlay(); }
+
+  function layoutEditor() {
+    const ed = state.editing; if (!ed) return;
+    const s = cssScale();
+    const pw = state.pageSize ? state.pageSize.w : Infinity, ph = state.pageSize ? state.pageSize.h : Infinity;
+    ed.w = Math.max(MIN_W, Math.min(ed.w, pw - ed.x));
+    ed.h = Math.max(MIN_H, ed.h);
+    ed.x = Math.max(0, Math.min(ed.x, pw - MIN_W)); ed.y = Math.max(0, Math.min(ed.y, ph - MIN_H));
+    ie.style.left = (ed.x * s) + 'px'; ie.style.top = (ed.y * s) + 'px';
+    ie.style.width = (ed.w * s) + 'px'; ie.style.height = (ed.h * s) + 'px';
+    ieText.style.fontSize = (ed.fontSize * s) + 'px';
+    ieText.style.color = ed.color;
+    // 도구 막대가 페이지 아래로 벗어나면 상자 위쪽에 표시
+    ie.classList.toggle('above', (ed.y + ed.h) * s + 60 > ph * s);
+  }
+  function growToFit() {
+    // 입력 내용이 상자보다 길어지면 상자 높이를 자동으로 늘림
+    const ed = state.editing; if (!ed) return;
+    const s = cssScale();
+    ieText.style.height = '0px';
+    const need = ieText.scrollHeight / s + 2;
+    ieText.style.height = '100%';
+    if (need > ed.h) { ed.h = need; layoutEditor(); }
+  }
+  function openEditor(ed, text) {
+    state.editing = ed;
+    ieText.value = text; $('ie-size').value = ed.fontSize; $('ie-color').value = ed.color;
+    $('ie-title').textContent = ed.kind === 'add' ? '글 추가' : '글 수정';
+    $('ie-delete').style.display = ed.kind === 'replace' ? '' : 'none';
+    ie.classList.add('open');
+    layoutEditor(); growToFit(); renderOverlay();
+    ieText.focus();
+    if (ed.kind === 'replace') ieText.select();
+  }
+  function freeRightEdge(b) {
+    // 같은 높이에 있는 다른 텍스트 직전까지, 없으면 페이지 오른쪽 여백까지 상자를 넓힘
+    const [x0, y0, x1, y1] = b.bbox;
+    const pw = state.pageSize ? state.pageSize.w : x1;
+    let limit = Math.max(x1, pw - 18);
+    for (const o of state.blocks) {
+      if (o.id === b.id) continue;
+      const [ox0, oy0, ox1, oy1] = o.bbox;
+      if (oy0 < y1 && oy1 > y0 && ox0 >= x1 - 1 && ox0 < limit) limit = Math.max(x1, ox0 - 4);
+    }
+    return limit;
+  }
   function beginReplace(b) {
-    state.editing = { kind: 'replace', id: b.id, bbox: b.bbox };
-    $('editor-title').textContent = '✏️ 텍스트 수정';
-    $('editor-text').value = b.text; $('editor-size').value = b.font_size; $('editor-color').value = b.color;
-    $('editor-width-row').style.display = 'none'; $('editor-delete').style.display = '';
-    $('editor-hint').textContent = '기존 글자를 지우고 입력한 내용으로 다시 씁니다. 글자가 넘치면 크기가 자동으로 줄어듭니다.';
-    openEditor(); renderOverlay(); $('editor-text').focus();
+    const [x0, y0, x1, y1] = b.bbox;
+    const h = Math.max(y1 - y0 + 1, b.font_size * 1.2 * b.lines.length + 2);
+    openEditor({ kind: 'replace', id: b.id, bbox: b.bbox, x: x0, y: y0, w: freeRightEdge(b) - x0, h, fontSize: b.font_size, color: b.color }, b.text);
   }
   function beginAdd(x, y) {
-    state.editing = { kind: 'add', x, y };
-    $('editor-title').textContent = `➕ 글 추가 (${Math.round(x)}, ${Math.round(y)} pt)`;
-    $('editor-text').value = ''; $('editor-size').value = 12; $('editor-color').value = '#000000';
-    $('editor-width-row').style.display = ''; $('editor-delete').style.display = 'none';
-    $('editor-hint').textContent = '클릭한 지점을 왼쪽 위 모서리로 하여 글을 씁니다. Enter 로 줄을 바꿀 수 있습니다.';
-    openEditor(); $('editor-text').focus();
+    const fontSize = parseFloat($('ie-size').value) || 12;
+    const pw = state.pageSize ? state.pageSize.w : 595;
+    const w = Math.min(220, pw - x);
+    openEditor({ kind: 'add', x, y, w, h: fontSize * 1.2 + 4, fontSize, color: $('ie-color').value || '#000000' }, '');
   }
-  $('editor-cancel').addEventListener('click', closeEditor);
-  $('editor-apply').addEventListener('click', async () => {
+
+  ieText.addEventListener('input', growToFit);
+  $('ie-size').addEventListener('input', () => {
     const ed = state.editing; if (!ed) return;
-    const text = $('editor-text').value;
-    const font_size = parseFloat($('editor-size').value) || 12;
-    const color = $('editor-color').value;
-    if (ed.kind === 'replace') {
-      await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text, font_size, color }, '텍스트를 수정했습니다.');
-    } else {
-      if (!text.trim()) { setStatus('추가할 내용을 입력하세요.', 'err'); return; }
-      const w = parseFloat($('editor-width').value) || null;
-      await mutate(`/page/${state.current}/add_text`, { x: ed.x, y: ed.y, text, font_size, color, max_width: w }, '텍스트를 추가했습니다.');
-    }
-    closeEditor();
+    ed.fontSize = Math.max(4, parseFloat($('ie-size').value) || ed.fontSize);
+    layoutEditor(); growToFit();
   });
-  $('editor-delete').addEventListener('click', async () => {
+  $('ie-color').addEventListener('input', () => { const ed = state.editing; if (!ed) return; ed.color = $('ie-color').value; layoutEditor(); });
+
+  // 상자 이동 / 크기 조절 (마우스·터치 공통)
+  function dragHandle(el, onMove) {
+    el.addEventListener('pointerdown', (ev) => {
+      const ed = state.editing; if (!ed) return;
+      ev.preventDefault(); ev.stopPropagation();
+      const s = cssScale();
+      const start = { px: ev.clientX, py: ev.clientY, x: ed.x, y: ed.y, w: ed.w, h: ed.h };
+      const move = (e) => { onMove(ed, start, (e.clientX - start.px) / s, (e.clientY - start.py) / s); layoutEditor(); };
+      const up = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up); growToFit(); };
+      document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+    });
+  }
+  dragHandle(ie.querySelector('.ie-move'), (ed, st, dx, dy) => { ed.x = st.x + dx; ed.y = st.y + dy; });
+  dragHandle(ie.querySelector('.ie-resize'), (ed, st, dx, dy) => { ed.w = st.w + dx; ed.h = st.h + dy; });
+  ie.addEventListener('click', (ev) => ev.stopPropagation());
+
+  $('ie-cancel').addEventListener('click', closeEditor);
+  $('ie-apply').addEventListener('click', async () => {
+    const ed = state.editing; if (!ed) return;
+    const text = ieText.value;
+    const font_size = ed.fontSize, color = ed.color;
+    const box = [ed.x, ed.y, ed.x + ed.w, ed.y + ed.h];
+    try {
+      if (ed.kind === 'replace') {
+        await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text, font_size, color, new_bbox: box }, text.trim() ? '텍스트를 수정했습니다.' : '텍스트를 삭제했습니다.');
+      } else {
+        if (!text.trim()) { setStatus('추가할 내용을 입력하세요.', 'err'); ieText.focus(); return; }
+        await mutate(`/page/${state.current}/add_text`, { x: ed.x, y: ed.y, text, font_size, color, max_width: ed.w, height: ed.h }, '텍스트를 추가했습니다.');
+      }
+      closeEditor();
+    } catch (e) { /* 상태 표시줄에 오류가 표시됨. 상자는 유지 */ }
+  });
+  $('ie-delete').addEventListener('click', async () => {
     const ed = state.editing; if (!ed || ed.kind !== 'replace') return;
-    await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text: '' }, '텍스트를 삭제했습니다.');
-    closeEditor();
+    try {
+      await mutate(`/page/${state.current}/replace`, { bbox: ed.bbox, text: '' }, '텍스트를 삭제했습니다.');
+      closeEditor();
+    } catch (e) {}
   });
   $('btn-addtext').addEventListener('click', () => {
     state.addMode = !state.addMode;
@@ -560,7 +647,7 @@
     if (!state.docId) return;
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !inField) { ev.preventDefault(); if (state.canUndo) mutate('/undo', {}, '실행 취소'); }
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'y' && !inField) { ev.preventDefault(); if (state.canRedo) mutate('/redo', {}, '다시 실행'); }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && state.editing) { ev.preventDefault(); $('editor-apply').click(); }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && state.editing) { ev.preventDefault(); $('ie-apply').click(); }
     if (ev.key === 'Escape') { closeEditor(); document.querySelectorAll('.modal-bg.open').forEach(m => m.classList.remove('open')); }
     if (!inField && ev.key === 'PageDown' && state.current < state.pages.length - 1) { ev.preventDefault(); showPage(state.current + 1); }
     if (!inField && ev.key === 'PageUp' && state.current > 0) { ev.preventDefault(); showPage(state.current - 1); }

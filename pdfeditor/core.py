@@ -26,6 +26,7 @@ FONT_NAME = "PDFEditorCJK"
 _FALLBACK_FONT: pymupdf.Font | None = None
 
 MAX_UNDO = 30
+LINE_HEIGHT = 1.2  # 삽입하는 텍스트의 줄 간격 (글자 크기 배수). 화면 편집 상자와 동일하게 유지.
 
 
 def _fallback_font() -> pymupdf.Font:
@@ -291,10 +292,12 @@ class PDFEditor:
         font_size: float = 12.0,
         color="#000000",
         max_width: float | None = None,
+        height: float | None = None,
     ) -> tuple[float, float, float, float]:
         """(x, y) 를 왼쪽 위 모서리로 하여 텍스트를 추가합니다.
 
-        max_width 를 주면 그 너비 안에서 자동 줄바꿈됩니다. 반환값은 실제로 쓰인 영역(화면 좌표).
+        max_width 를 주면 그 너비 안에서 자동 줄바꿈됩니다. height 를 주면 그 높이의 상자 안에 넣고,
+        넘치면 아래쪽으로 늘립니다. 반환값은 실제로 쓰인 영역(화면 좌표).
         """
         if not text:
             raise ValueError("추가할 텍스트가 비어 있습니다.")
@@ -303,42 +306,62 @@ class PDFEditor:
         fontname = self._ensure_font(page)
         rgb = _normalize_color(color)
         font = _fallback_font()
-        line_h = font_size * 1.25
+        line_h = font_size * LINE_HEIGHT
         lines = text.split("\n")
         width = max_width if max_width else max(font.text_length(ln, fontsize=font_size) for ln in lines) + 2
         page_w, page_h = page.rect.width, page.rect.height
         width = min(width, max(page_w - x, font_size))
-        if max_width:
-            # 줄바꿈이 필요한 높이를 계산하기 위해 임시 문서에서 미리 배치
-            n_lines = 0
-            for ln in lines:
-                n_lines += max(1, _wrap_count(font, ln, font_size, width))
-        else:
-            n_lines = len(lines)
-        height = n_lines * line_h + font_size * 0.4
+        if height is None:
+            if max_width:
+                n_lines = sum(max(1, _wrap_count(font, ln, font_size, width)) for ln in lines)
+            else:
+                n_lines = len(lines)
+            height = n_lines * line_h + font_size * 0.4
         rect = pymupdf.Rect(x, y, x + width, min(page_h, y + height))
-        rect_unrot = rect * page.derotation_matrix
-        rc = page.insert_textbox(
-            rect_unrot,
-            text,
-            fontsize=font_size,
-            fontname=fontname,
-            color=rgb,
-            rotate=page.rotation,
-            lineheight=1.25,
-        )
-        if rc < 0:
-            # 공간이 부족하면 페이지 아래쪽까지 확장하여 다시 시도
-            page.insert_textbox(
-                pymupdf.Rect(x, y, page_w, page_h) * page.derotation_matrix,
-                text,
-                fontsize=font_size,
-                fontname=fontname,
-                color=rgb,
-                rotate=page.rotation,
-                lineheight=1.25,
-            )
+        self._insert_in_box(page, rect, text, font_size, fontname, rgb, shrink=False)
         return (rect.x0, rect.y0, rect.x1, rect.y1)
+
+    def _insert_in_box(
+        self,
+        page: pymupdf.Page,
+        box: pymupdf.Rect,
+        text: str,
+        size: float,
+        fontname: str,
+        rgb: tuple[float, float, float],
+        shrink: bool,
+    ) -> None:
+        """box(화면 좌표) 안에 텍스트를 넣습니다.
+
+        shrink=True 면 넘칠 때 글자 크기를 조금씩 줄이고, False 면 크기를 유지한 채 상자를
+        아래로 늘립니다. 그래도 안 들어가면 페이지 끝까지 늘려서 강제로 넣습니다.
+        """
+        page_w, page_h = page.rect.width, page.rect.height
+
+        def try_insert(rect: pymupdf.Rect, fsize: float) -> bool:
+            r = rect * page.derotation_matrix
+            r.normalize()
+            return page.insert_textbox(r, text, fontsize=fsize, fontname=fontname, color=rgb, rotate=page.rotation, lineheight=LINE_HEIGHT) >= 0
+
+        if try_insert(box, size):
+            return
+        if shrink:
+            s = size
+            while s > 4:
+                s -= 0.5
+                if try_insert(box, s):
+                    return
+            size = max(s, 4)
+        # 아래로 늘려서 재시도
+        tall = pymupdf.Rect(box.x0, box.y0, box.x1, page_h)
+        if try_insert(tall, size):
+            return
+        # 오른쪽/아래 모두 페이지 끝까지
+        big = pymupdf.Rect(box.x0, box.y0, page_w, page_h)
+        if not try_insert(big, size):
+            r = big * page.derotation_matrix
+            r.normalize()
+            page.insert_textbox(r, text, fontsize=4, fontname=fontname, color=rgb, rotate=page.rotation, lineheight=LINE_HEIGHT)
 
     def replace_text(
         self,
@@ -348,10 +371,13 @@ class PDFEditor:
         font_size: float | None = None,
         color="#000000",
         keep_images: bool = True,
+        target_bbox: Sequence[float] | None = None,
     ) -> None:
         """bbox(화면 좌표) 안의 기존 텍스트를 지우고 new_text 로 바꿉니다.
 
-        new_text 가 빈 문자열이면 텍스트를 삭제만 합니다. 글자가 넘치면 폰트를 조금씩 줄여서 맞춥니다.
+        new_text 가 빈 문자열이면 텍스트를 삭제만 합니다.
+        target_bbox 를 주면 새 텍스트를 그 상자에 넣고(넘치면 아래로 늘림), 주지 않으면 원래 자리에
+        넣되 글자가 넘치면 폰트를 조금씩 줄여서 맞춥니다.
         """
         page = self._page(index)
         self._snapshot()
@@ -369,31 +395,15 @@ class PDFEditor:
         fontname = self._ensure_font(page)
         rgb = _normalize_color(color)
         size = float(font_size or 11.0)
+        if target_bbox is not None:
+            box = pymupdf.Rect(*target_bbox)
+            box.normalize()
+            self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=False)
+            return
         # 새 텍스트가 들어갈 영역: 원래 영역을 오른쪽 빈 공간까지 넓히고 아래로 약간 여유를 둠
         right = self._free_right_edge(index, rect)
         box = pymupdf.Rect(rect.x0, rect.y0, max(right, rect.x0 + size), rect.y1 + size * 0.5)
-        box_unrot = box * page.derotation_matrix
-        box_unrot.normalize()
-        for attempt in range(40):
-            rc = page.insert_textbox(
-                box_unrot,
-                new_text,
-                fontsize=size,
-                fontname=fontname,
-                color=rgb,
-                rotate=page.rotation,
-                lineheight=1.2,
-            )
-            if rc >= 0:
-                return
-            size -= 0.5
-            if size < 4:
-                break
-        # 그래도 안 들어가면 페이지 끝까지 늘려서 강제로 삽입
-        page_w, page_h = page.rect.width, page.rect.height
-        big = pymupdf.Rect(rect.x0, rect.y0, page_w, page_h) * page.derotation_matrix
-        big.normalize()
-        page.insert_textbox(big, new_text, fontsize=max(size, 4), fontname=fontname, color=rgb, rotate=page.rotation)
+        self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=True)
 
     def _free_right_edge(self, index: int, rect: pymupdf.Rect, margin: float = 18.0) -> float:
         """rect 와 같은 높이에 있는 다른 텍스트 블록 직전까지, 없으면 페이지 오른쪽 여백까지의 x 좌표."""

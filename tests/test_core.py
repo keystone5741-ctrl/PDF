@@ -105,6 +105,22 @@ def test_add_text_wraps_within_width(ed):
     assert len(blk.lines) > 1
 
 
+def test_add_text_with_box_height_keeps_font_and_grows(ed):
+    # 상자가 너무 작아도 글자 크기는 유지하고 아래로 늘려서 넣는다
+    ed.add_text(0, 72, 600, "첫 줄\n둘째 줄\n셋째 줄", font_size=14, max_width=200, height=10)
+    blk = next(b for b in ed.get_text_blocks(0) if "첫 줄" in b.text)
+    assert blk.font_size == 14.0 and len(blk.lines) == 3
+
+
+def test_replace_text_into_target_box(ed):
+    blk = ed.get_text_blocks(0)[0]  # "Title 1"
+    ed.replace_text(0, blk.bbox, "옮긴 제목", font_size=18, target_bbox=(300, 400, 500, 430))
+    new = next(b for b in ed.get_text_blocks(0) if b.text == "옮긴 제목")
+    assert abs(new.bbox[0] - 300) < 3 and abs(new.bbox[1] - 400) < 5
+    assert new.font_size == 18.0
+    assert "Title 1" not in ed.get_page_text(0)
+
+
 def test_add_text_rejects_empty(ed):
     with pytest.raises(ValueError):
         ed.add_text(0, 10, 10, "")
