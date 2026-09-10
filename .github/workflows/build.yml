@@ -1,0 +1,60 @@
+name: 테스트 및 실행 파일 빌드
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: 테스트 (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: pytest -q
+
+  build-windows:
+    name: Windows 실행 파일
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-desktop.txt
+      - name: PyInstaller 빌드
+        run: pyinstaller pdfeditor.spec --noconfirm --clean
+      - name: 번들 자가 진단
+        run: dist\PDFEditor.exe --selftest
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFEditor-windows
+          path: dist/PDFEditor.exe
+          if-no-files-found: error
+
+  release:
+    name: 릴리스에 첨부
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PDFEditor-windows
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/PDFEditor.exe
+          generate_release_notes: true

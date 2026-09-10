@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.spec.bak
+pdf-editor.log
+.venv/
+venv/
+*_edited.pdf
+*_pages.pdf
