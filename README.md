@@ -24,7 +24,8 @@ python main.py              # 브라우저가 자동으로 열립니다 (http://
 python main.py 문서.pdf     # 파일을 바로 열면서 실행
 ```
 
-Windows 는 `run.bat`, macOS/Linux 는 `./run.sh` 를 실행해도 됩니다 (가상환경을 자동으로 만들어 줍니다).
+Windows 는 `run.bat` 을 더블클릭, macOS/Linux 는 `./run.sh` 를 실행해도 됩니다 (가상환경을 자동으로 만들어 줍니다).
+`run.bat` 창이 바로 닫히거나 "파이썬을 찾을 수 없습니다" 가 나오면, 파이썬 설치 시 "Add python.exe to PATH" 를 체크했는지 확인하세요.
 
 ## 화면 사용법
 
