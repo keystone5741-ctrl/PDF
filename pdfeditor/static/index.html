@@ -75,6 +75,14 @@
   #viewer { flex: 1; overflow: auto; position: relative; padding: 24px; display: flex; justify-content: center; align-items: flex-start; }
   #page-wrap { position: relative; box-shadow: 0 2px 12px var(--shadow); background: #fff; display: none; }
   #page-wrap.addmode { cursor: crosshair; }
+  #ink { position: absolute; inset: 0; z-index: 15; pointer-events: none; touch-action: none; }
+  #page-wrap.penmode #ink { pointer-events: auto; cursor: crosshair; }
+  #page-wrap.penmode .blk { pointer-events: none; }
+  #pen-tools { display: none; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  #pen-tools.open { display: flex; }
+  #pen-tools input[type=number] { width: 56px; padding: 3px 6px; }
+  #pen-tools input[type=color] { width: 30px; height: 26px; padding: 0 2px; border: 1px solid var(--border); border-radius: 5px; background: var(--input-bg); }
+  #pen-tools button { padding: 3px 8px; font-size: 12px; }
   #page-img { display: block; }
   #overlay { position: absolute; inset: 0; }
   .blk {
@@ -154,6 +162,13 @@
   <button id="btn-redo" disabled title="다시 실행 (Ctrl+Y)">↷ 다시 실행</button>
   <span class="sep"></span>
   <button id="btn-addtext" disabled title="페이지를 클릭한 위치에 새 글을 씁니다">✏️ 글 추가</button>
+  <button id="btn-pen" disabled title="마우스/펜으로 자유롭게 그립니다 (손떨림 보정)">🖊️ 펜</button>
+  <span id="pen-tools">
+    <button id="pen-kind-pen" class="active" title="가는 선">펜</button>
+    <button id="pen-kind-hl" title="반투명 굵은 선">형광펜</button>
+    <span>색</span><input type="color" id="pen-color" value="#d32f2f">
+    <span>굵기</span><input type="number" id="pen-width" min="0.5" max="40" step="0.5" value="2.5">
+  </span>
   <button id="btn-showblocks" disabled title="수정 가능한 텍스트 영역을 표시">🔲 텍스트 영역 표시</button>
   <button id="btn-findreplace" disabled>🔁 찾아 바꾸기</button>
   <span class="sep"></span>
@@ -191,6 +206,7 @@
     <div id="page-wrap">
       <img id="page-img" alt="페이지">
       <div id="overlay"></div>
+      <canvas id="ink"></canvas>
       <!-- 페이지 위에 바로 뜨는 텍스트 상자 -->
       <div id="ie-cover"></div>
       <div id="ie">
@@ -261,7 +277,7 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     docId: null, name: '', path: null, pages: [], current: 0, zoom: 1.0, version: 0,
-    addMode: false, showBlocks: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
+    addMode: false, penMode: false, showBlocks: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
     editing: null, // {kind:'replace'|'add', id?, bbox?(원본 영역), x, y, w, h (pt 단위 상자)}
   };
   const RENDER_SCALE = 1.5; // 서버에 요청하는 기본 해상도 배율
@@ -291,13 +307,13 @@
   // ------------------------------------------------------------ 문서 상태
   function applyState(st) {
     state.docId = st.id; state.name = st.name; state.path = st.path; state.pages = st.pages;
-    state.canUndo = st.can_undo; state.canRedo = st.can_redo; state.version++;
+    state.canUndo = st.can_undo; state.canRedo = st.can_redo;
     if (state.current >= state.pages.length) state.current = state.pages.length - 1;
     if (state.current < 0) state.current = 0;
     $('filename').textContent = st.name; $('filename').title = st.path || st.name;
     $('page-count').textContent = `${st.page_count} 페이지`;
     document.title = `${st.name} - PDF 편집기`;
-    for (const id of ['btn-addtext', 'btn-showblocks', 'btn-findreplace', 'btn-extract', 'btn-zoom-in', 'btn-zoom-out', 'btn-download', 'btn-save'])
+    for (const id of ['btn-addtext', 'btn-pen', 'btn-showblocks', 'btn-findreplace', 'btn-extract', 'btn-zoom-in', 'btn-zoom-out', 'btn-download', 'btn-save'])
       $(id).disabled = false;
     $('btn-undo').disabled = !state.canUndo; $('btn-redo').disabled = !state.canRedo;
     $('empty').style.display = 'none'; $('page-wrap').style.display = 'block';
@@ -322,59 +338,78 @@
   }
 
   // ------------------------------------------------------------ 썸네일 / 페이지 목록
+  // 페이지마다 서버가 주는 key 가 있고, 내용이 바뀐 페이지만 key 가 달라집니다.
+  // 썸네일 요소를 key 별로 재사용해서 바뀌지 않은 페이지는 다시 내려받지도, 깜빡이지도 않게 합니다.
+  const thumbEls = new Map(); // key → element
+  function thumbUrl(i) { return docUrl(`/page/${i}/image?zoom=0.35&v=${state.pages[i].key}`); }
+  function pageUrl(i) { return docUrl(`/page/${i}/image?zoom=${RENDER_SCALE * state.zoom}&v=${state.pages[i].key}`); }
+
+  function makeThumb() {
+    const d = document.createElement('div');
+    d.className = 'thumb'; d.draggable = true;
+    d.innerHTML = `
+      <img alt="" loading="lazy" decoding="async">
+      <div class="meta">
+        <label><input type="checkbox"> <span class="num"></span></label>
+        <div class="actions">
+          <button data-act="up" title="위로">▲</button>
+          <button data-act="down" title="아래로">▼</button>
+          <button data-act="rotate" title="90° 회전">⟳</button>
+          <button data-act="dup" title="페이지 복제">⧉</button>
+          <button data-act="del" title="페이지 삭제" class="danger">✕</button>
+        </div>
+      </div>`;
+    d.addEventListener('click', (ev) => {
+      if (ev.target.closest('button') || ev.target.closest('label')) return;
+      showPage(+d.dataset.idx);
+    });
+    d.querySelector('.actions').addEventListener('click', async (ev) => {
+      const b = ev.target.closest('button'); if (!b) return;
+      ev.stopPropagation();
+      const i = +d.dataset.idx, act = b.dataset.act;
+      if (act === 'up' && i > 0) { state.current = i - 1; await mutate('/move', { from: i, to: i - 1 }, `${i + 1}페이지를 위로 이동`); }
+      if (act === 'down' && i < state.pages.length - 1) { state.current = i + 1; await mutate('/move', { from: i, to: i + 1 }, `${i + 1}페이지를 아래로 이동`); }
+      if (act === 'rotate') { await mutate('/rotate', { page: i, degrees: 90 }, `${i + 1}페이지 회전`); }
+      if (act === 'dup') { await mutate('/duplicate', { page: i }, `${i + 1}페이지 복제`); }
+      if (act === 'del') {
+        if (state.pages.length <= 1) { setStatus('마지막 페이지는 삭제할 수 없습니다.', 'err'); return; }
+        if (!confirm(`${i + 1}페이지를 삭제할까요?`)) return;
+        await mutate('/delete', { pages: [i] }, `${i + 1}페이지 삭제`);
+      }
+    });
+    // 드래그 앤 드롭 순서 변경
+    d.addEventListener('dragstart', (ev) => { ev.dataTransfer.setData('text/plain', d.dataset.idx); ev.dataTransfer.effectAllowed = 'move'; d.classList.add('dragging'); });
+    d.addEventListener('dragend', () => d.classList.remove('dragging'));
+    d.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; d.classList.add('drag-over'); });
+    d.addEventListener('dragleave', () => d.classList.remove('drag-over'));
+    d.addEventListener('drop', async (ev) => {
+      ev.preventDefault(); d.classList.remove('drag-over');
+      const from = parseInt(ev.dataTransfer.getData('text/plain'), 10), to = +d.dataset.idx;
+      if (isNaN(from) || from === to) return;
+      state.current = to;
+      await mutate('/move', { from, to }, `${from + 1}페이지를 ${to + 1}번째 위치로 이동`);
+    });
+    return d;
+  }
   function renderThumbs() {
     const box = $('thumbs');
-    const checked = new Set([...box.querySelectorAll('input[type=checkbox]:checked')].map(c => +c.dataset.idx));
-    box.innerHTML = '';
+    const live = new Set();
     state.pages.forEach((p, i) => {
-      const d = document.createElement('div');
-      d.className = 'thumb' + (i === state.current ? ' current' : '');
-      d.draggable = true; d.dataset.idx = i;
-      d.innerHTML = `
-        <img src="${docUrl(`/page/${i}/image?zoom=0.35&v=${state.version}`)}" alt="${i + 1}페이지" loading="lazy">
-        <div class="meta">
-          <label><input type="checkbox" data-idx="${i}" ${checked.has(i) ? 'checked' : ''}> ${i + 1}</label>
-          <div class="actions">
-            <button data-act="up" title="위로">▲</button>
-            <button data-act="down" title="아래로">▼</button>
-            <button data-act="rotate" title="90° 회전">⟳</button>
-            <button data-act="dup" title="페이지 복제">⧉</button>
-            <button data-act="del" title="페이지 삭제" class="danger">✕</button>
-          </div>
-        </div>`;
-      d.addEventListener('click', (ev) => {
-        if (ev.target.closest('button') || ev.target.closest('label')) return;
-        showPage(i);
-      });
-      d.querySelector('.actions').addEventListener('click', async (ev) => {
-        const b = ev.target.closest('button'); if (!b) return;
-        ev.stopPropagation();
-        const act = b.dataset.act;
-        if (act === 'up' && i > 0) { state.current = i - 1; await mutate('/move', { from: i, to: i - 1 }, `${i + 1}페이지를 위로 이동`); }
-        if (act === 'down' && i < state.pages.length - 1) { state.current = i + 1; await mutate('/move', { from: i, to: i + 1 }, `${i + 1}페이지를 아래로 이동`); }
-        if (act === 'rotate') { await mutate('/rotate', { page: i, degrees: 90 }, `${i + 1}페이지 회전`); }
-        if (act === 'dup') { await mutate('/duplicate', { page: i }, `${i + 1}페이지 복제`); }
-        if (act === 'del') {
-          if (state.pages.length <= 1) { setStatus('마지막 페이지는 삭제할 수 없습니다.', 'err'); return; }
-          if (!confirm(`${i + 1}페이지를 삭제할까요?`)) return;
-          await mutate('/delete', { pages: [i] }, `${i + 1}페이지 삭제`);
-        }
-      });
-      // 드래그 앤 드롭 순서 변경
-      d.addEventListener('dragstart', (ev) => { ev.dataTransfer.setData('text/plain', String(i)); ev.dataTransfer.effectAllowed = 'move'; d.classList.add('dragging'); });
-      d.addEventListener('dragend', () => d.classList.remove('dragging'));
-      d.addEventListener('dragover', (ev) => { ev.preventDefault(); ev.dataTransfer.dropEffect = 'move'; d.classList.add('drag-over'); });
-      d.addEventListener('dragleave', () => d.classList.remove('drag-over'));
-      d.addEventListener('drop', async (ev) => {
-        ev.preventDefault(); d.classList.remove('drag-over');
-        const from = parseInt(ev.dataTransfer.getData('text/plain'), 10);
-        if (isNaN(from) || from === i) return;
-        const to = i;
-        state.current = to;
-        await mutate('/move', { from, to }, `${from + 1}페이지를 ${to + 1}번째 위치로 이동`);
-      });
-      box.appendChild(d);
+      let d = thumbEls.get(p.key);
+      if (!d) { d = makeThumb(); thumbEls.set(p.key, d); }
+      live.add(p.key);
+      d.dataset.idx = i;
+      d.classList.toggle('current', i === state.current);
+      d.querySelector('.num').textContent = i + 1;
+      d.querySelector('input[type=checkbox]').dataset.idx = i;
+      const img = d.querySelector('img');
+      const url = thumbUrl(i);
+      if (img.getAttribute('src') !== url) img.src = url;
+      img.alt = `${i + 1}페이지`;
+      if (box.children[i] !== d) box.insertBefore(d, box.children[i] || null);
     });
+    for (const [key, d] of [...thumbEls]) { if (!live.has(key)) { d.remove(); thumbEls.delete(key); } }
+    while (box.children.length > state.pages.length) box.lastChild.remove();
     const cur = box.querySelector('.thumb.current');
     if (cur) cur.scrollIntoView({ block: 'nearest' });
   }
@@ -395,20 +430,41 @@
   });
 
   // ------------------------------------------------------------ 페이지 보기
+  let showToken = 0;
+  const prefetched = new Set();
+  function prefetch(i) {
+    if (i < 0 || i >= state.pages.length) return;
+    const url = pageUrl(i);
+    if (prefetched.has(url)) return;
+    prefetched.add(url);
+    const im = new Image(); im.src = url;
+  }
   async function showPage(i) {
     state.current = i;
+    const token = ++showToken;
     document.querySelectorAll('.thumb').forEach(t => t.classList.toggle('current', +t.dataset.idx === i));
     const img = $('page-img');
-    const scale = RENDER_SCALE * state.zoom;
-    img.src = docUrl(`/page/${i}/image?zoom=${scale}&v=${state.version}`);
+    const p = state.pages[i];
+    const s = cssScale();
+    // 크기는 서버 상태에서 바로 알 수 있으므로 이미지가 오기 전에 먼저 맞춰 둠 (레이아웃 튐 방지)
+    img.style.width = (p.width * s) + 'px'; img.style.height = (p.height * s) + 'px';
+    state.pageSize = { w: p.width, h: p.height };
+    sizeInk();
+    const url = pageUrl(i);
+    if (img.getAttribute('src') !== url) {
+      // 새 이미지를 뒤에서 먼저 받은 뒤 바꿔치기 → 이전 그림이 그대로 보이다가 한 번에 바뀜
+      const im = new Image();
+      im.onload = () => { if (token === showToken) { img.src = url; onPageImageReady(p.key); } };
+      im.onerror = () => { if (token === showToken) setTimeout(() => { if (token === showToken) { img.src = url + '&retry=1'; } }, 400); };
+      im.src = url;
+    } else { onPageImageReady(p.key); }
     try {
       const data = await api(docUrl(`/page/${i}/blocks`));
+      if (token !== showToken) return;
       state.blocks = data.blocks; state.pageSize = { w: data.width, h: data.height };
-      const cssScale = 96 / 72 * state.zoom; // 1pt = 1.333px @100%
-      img.style.width = (data.width * cssScale) + 'px';
-      img.style.height = (data.height * cssScale) + 'px';
       renderOverlay();
     } catch (e) { setStatus('페이지 정보를 불러오지 못했습니다: ' + e.message, 'err'); }
+    prefetch(i + 1); prefetch(i - 1);
   }
   function cssScale() { return 96 / 72 * state.zoom; }
   function renderOverlay() {
@@ -422,15 +478,15 @@
       el.style.width = Math.max(4, (x1 - x0) * s) + 'px'; el.style.height = Math.max(4, (y1 - y0) * s) + 'px';
       el.title = b.text;
       el.addEventListener('click', (ev) => {
-        if (state.addMode || state.editing) return; // 글 추가 모드/편집 중에는 페이지 클릭으로 처리
-        ev.stopPropagation(); beginReplace(b);
+        if (state.editing || state.penMode) return; // 편집 중에는 적용/취소로 먼저 끝내야 함
+        ev.stopPropagation(); beginReplace(b); // 글 추가 모드에서도 이미 있는 글을 누르면 그 글을 수정
       });
       ov.appendChild(el);
     });
   }
   $('page-wrap').addEventListener('click', (ev) => {
     if (!state.docId || ev.target.closest('#ie')) return;
-    if (state.editing) return; // 편집 중에는 적용/취소로 먼저 끝내야 함
+    if (state.editing || state.penMode) return; // 편집 중에는 적용/취소로 먼저 끝내야 함
     const rect = $('page-img').getBoundingClientRect();
     const s = cssScale();
     const x = (ev.clientX - rect.left) / s, y = (ev.clientY - rect.top) / s;
@@ -566,6 +622,7 @@
     } catch (e) {}
   });
   $('btn-addtext').addEventListener('click', () => {
+    if (state.penMode) setPenMode(false);
     state.addMode = !state.addMode;
     $('btn-addtext').classList.toggle('active', state.addMode);
     $('page-wrap').classList.toggle('addmode', state.addMode);
@@ -576,6 +633,124 @@
     $('btn-showblocks').classList.toggle('active', state.showBlocks);
     $('page-wrap').classList.toggle('showblocks', state.showBlocks);
   });
+
+  // ------------------------------------------------------------ 펜 그리기 (손떨림 보정)
+  const ink = $('ink'), inkCtx = ink.getContext('2d');
+  const pen = { kind: 'pen', color: '#d32f2f', width: 2.5, hlColor: '#ffeb3b', hlWidth: 14 };
+  let strokes = [];          // 서버에 보냈지만 아직 새 페이지 그림이 오지 않은 획들 (화면 유지용)
+  let clearInkOnKey = null;  // 이 키의 페이지 그림이 도착하면 캔버스를 비움
+  function sizeInk() {
+    const img = $('page-img');
+    const w = img.clientWidth || parseFloat(img.style.width) || 0, h = img.clientHeight || parseFloat(img.style.height) || 0;
+    const dpr = window.devicePixelRatio || 1;
+    if (ink.width !== Math.round(w * dpr) || ink.height !== Math.round(h * dpr)) {
+      ink.width = Math.round(w * dpr); ink.height = Math.round(h * dpr);
+      ink.style.width = w + 'px'; ink.style.height = h + 'px';
+      redrawStrokes();
+    }
+  }
+  function onPageImageReady(key) {
+    if (clearInkOnKey && key === clearInkOnKey) { strokes = []; clearInkOnKey = null; inkCtx.clearRect(0, 0, ink.width, ink.height); }
+  }
+  function strokeStyle(st) {
+    inkCtx.lineCap = 'round'; inkCtx.lineJoin = 'round';
+    inkCtx.strokeStyle = st.color; inkCtx.lineWidth = st.width * cssScale() * (window.devicePixelRatio || 1);
+    inkCtx.globalAlpha = st.opacity;
+  }
+  function drawPath(pts) {
+    // 점들의 중점을 잇는 2차 곡선으로 부드럽게 표시
+    if (pts.length < 2) { if (pts.length === 1) { inkCtx.beginPath(); inkCtx.arc(pts[0][0], pts[0][1], inkCtx.lineWidth / 2, 0, Math.PI * 2); inkCtx.fillStyle = inkCtx.strokeStyle; inkCtx.fill(); } return; }
+    inkCtx.beginPath(); inkCtx.moveTo(pts[0][0], pts[0][1]);
+    for (let k = 1; k < pts.length - 1; k++) {
+      const mx = (pts[k][0] + pts[k + 1][0]) / 2, my = (pts[k][1] + pts[k + 1][1]) / 2;
+      inkCtx.quadraticCurveTo(pts[k][0], pts[k][1], mx, my);
+    }
+    const last = pts[pts.length - 1]; inkCtx.lineTo(last[0], last[1]); inkCtx.stroke();
+  }
+  function redrawStrokes() {
+    inkCtx.clearRect(0, 0, ink.width, ink.height);
+    const k = cssScale() * (window.devicePixelRatio || 1);
+    for (const st of strokes) { strokeStyle(st); drawPath(st.pts.map(([x, y]) => [x * k, y * k])); }
+    inkCtx.globalAlpha = 1;
+  }
+  // 더글라스-포이커 단순화: 거의 일직선인 중간 점을 덜어내 서버로 보내는 점 수를 줄임
+  function simplify(pts, eps) {
+    if (pts.length < 3) return pts;
+    const [a, b] = [pts[0], pts[pts.length - 1]];
+    let maxD = 0, idx = 0;
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1e-9;
+    for (let k = 1; k < pts.length - 1; k++) {
+      const d = Math.abs(dy * pts[k][0] - dx * pts[k][1] + b[0] * a[1] - b[1] * a[0]) / len;
+      if (d > maxD) { maxD = d; idx = k; }
+    }
+    if (maxD > eps) return simplify(pts.slice(0, idx + 1), eps).slice(0, -1).concat(simplify(pts.slice(idx), eps));
+    return [a, b];
+  }
+  let cur = null; // 그리는 중인 획 {raw:[], pts:[], sx, sy, color, width, opacity}
+  function penParams() {
+    return pen.kind === 'hl' ? { color: pen.hlColor, width: pen.hlWidth, opacity: 0.35 } : { color: pen.color, width: pen.width, opacity: 1 };
+  }
+  function canvasPoint(ev) {
+    const r = ink.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+    return [(ev.clientX - r.left) * dpr, (ev.clientY - r.top) * dpr];
+  }
+  ink.addEventListener('pointerdown', (ev) => {
+    if (!state.penMode || !state.docId) return;
+    ev.preventDefault(); ink.setPointerCapture(ev.pointerId);
+    const [x, y] = canvasPoint(ev);
+    cur = { ...penParams(), pts: [[x, y]], sx: x, sy: y, pid: ev.pointerId };
+    strokeStyle(cur); drawPath(cur.pts);
+  });
+  ink.addEventListener('pointermove', (ev) => {
+    if (!cur || ev.pointerId !== cur.pid) return;
+    ev.preventDefault();
+    const events = (ev.getCoalescedEvents && ev.getCoalescedEvents().length) ? ev.getCoalescedEvents() : [ev];
+    for (const e of events) {
+      const [x, y] = canvasPoint(e);
+      // 손떨림 보정: 지수 이동 평균으로 좌표를 부드럽게 만들고, 너무 가까운 점은 버림
+      cur.sx += (x - cur.sx) * 0.45; cur.sy += (y - cur.sy) * 0.45;
+      const last = cur.pts[cur.pts.length - 1];
+      if (Math.hypot(cur.sx - last[0], cur.sy - last[1]) < 1.2) continue;
+      cur.pts.push([cur.sx, cur.sy]);
+    }
+    strokeStyle(cur); redrawStrokes(); strokeStyle(cur); drawPath(cur.pts); inkCtx.globalAlpha = 1;
+  });
+  async function finishStroke(ev) {
+    if (!cur || ev.pointerId !== cur.pid) return;
+    const st = cur; cur = null;
+    const k = cssScale() * (window.devicePixelRatio || 1);
+    const ptsPt = simplify(st.pts, 0.9).map(([x, y]) => [+(x / k).toFixed(2), +(y / k).toFixed(2)]);
+    strokes.push({ color: st.color, width: st.width, opacity: st.opacity, pts: ptsPt });
+    redrawStrokes();
+    try {
+      const res = await post(docUrl(`/page/${state.current}/ink`), { points: ptsPt, color: st.color, width: st.width, opacity: st.opacity });
+      clearInkOnKey = res.pages[state.current].key; // 새 그림이 도착하면 캔버스의 임시 획을 지움
+      applyState(res);
+    } catch (e) { strokes = strokes.filter(s => s.pts !== ptsPt); redrawStrokes(); setStatus('그리기 실패: ' + e.message, 'err'); }
+  }
+  ink.addEventListener('pointerup', finishStroke);
+  ink.addEventListener('pointercancel', finishStroke);
+  function setPenMode(on) {
+    state.penMode = on;
+    if (on && state.addMode) { state.addMode = false; $('btn-addtext').classList.remove('active'); $('page-wrap').classList.remove('addmode'); }
+    if (on) closeEditor();
+    $('btn-pen').classList.toggle('active', on);
+    $('pen-tools').classList.toggle('open', on);
+    $('page-wrap').classList.toggle('penmode', on);
+    sizeInk();
+    setStatus(on ? '펜 모드: 페이지 위에 드래그해서 그리세요. 잘못 그리면 실행 취소(Ctrl+Z).' : '펜 모드 해제');
+  }
+  $('btn-pen').addEventListener('click', () => setPenMode(!state.penMode));
+  function syncPenTools() {
+    $('pen-kind-pen').classList.toggle('active', pen.kind === 'pen'); $('pen-kind-hl').classList.toggle('active', pen.kind === 'hl');
+    $('pen-color').value = pen.kind === 'hl' ? pen.hlColor : pen.color;
+    $('pen-width').value = pen.kind === 'hl' ? pen.hlWidth : pen.width;
+  }
+  $('pen-kind-pen').addEventListener('click', () => { pen.kind = 'pen'; syncPenTools(); });
+  $('pen-kind-hl').addEventListener('click', () => { pen.kind = 'hl'; syncPenTools(); });
+  $('pen-color').addEventListener('input', () => { if (pen.kind === 'hl') pen.hlColor = $('pen-color').value; else pen.color = $('pen-color').value; });
+  $('pen-width').addEventListener('input', () => { const v = Math.max(0.5, parseFloat($('pen-width').value) || 1); if (pen.kind === 'hl') pen.hlWidth = v; else pen.width = v; });
+  window.addEventListener('resize', sizeInk);
 
   // ------------------------------------------------------------ 실행 취소
   $('btn-undo').addEventListener('click', () => mutate('/undo', {}, '실행 취소'));
@@ -739,8 +914,8 @@
     if (!state.docId) return;
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !inField) { ev.preventDefault(); if (state.canUndo) mutate('/undo', {}, '실행 취소'); }
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'y' && !inField) { ev.preventDefault(); if (state.canRedo) mutate('/redo', {}, '다시 실행'); }
-    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && state.editing) { ev.preventDefault(); $('ie-apply').click(); }
-    if (ev.key === 'Escape') { closeEditor(); document.querySelectorAll('.modal-bg.open').forEach(m => m.classList.remove('open')); }
+    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter' && state.editing && !ev.isComposing) { ev.preventDefault(); $('ie-apply').click(); }
+    if (ev.key === 'Escape') { if (ev.isComposing) return; closeEditor(); document.querySelectorAll('.modal-bg.open').forEach(m => m.classList.remove('open')); }
     if (!inField && ev.key === 'PageDown' && state.current < state.pages.length - 1) { ev.preventDefault(); showPage(state.current + 1); }
     if (!inField && ev.key === 'PageUp' && state.current > 0) { ev.preventDefault(); showPage(state.current - 1); }
   });

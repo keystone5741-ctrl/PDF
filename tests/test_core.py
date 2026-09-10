@@ -230,3 +230,34 @@ def test_save_and_reopen(tmp_path):
 def test_render_page_png(ed):
     png = ed.render_page(0, zoom=0.5)
     assert png[:4] == b"\x89PNG"
+
+
+# ---------------------------------------------------------------- 페이지 키 / 펜
+def test_page_keys_change_only_for_edited_pages(ed):
+    keys = [p["key"] for p in ed.page_info()]
+    ed.add_text(1, 72, 500, "키 테스트")
+    after = [p["key"] for p in ed.page_info()]
+    assert after[1] != keys[1]
+    assert after[0] == keys[0] and after[2] == keys[2] and after[3] == keys[3]
+    ed.reorder_pages([3, 2, 1, 0])
+    assert [p["key"] for p in ed.page_info()] == list(reversed(after))
+    ed.delete_pages([0])
+    assert [p["key"] for p in ed.page_info()] == list(reversed(after))[1:]
+    ed.undo()  # 삭제 취소 → 키도 복원
+    assert [p["key"] for p in ed.page_info()] == list(reversed(after))
+
+
+def test_draw_stroke_smooth_and_highlighter(ed):
+    pts = [(100, 500), (140, 520), (180, 500), (220, 540), (260, 500)]
+    ed.draw_stroke(0, pts, color="#ff0000", width=3)
+    ed.draw_stroke(0, [(100, 600), (300, 600)], color="#ffeb3b", width=14, opacity=0.35)
+    ed.draw_stroke(0, [(50, 50)], color="#000000", width=4)  # 점 하나 → 원
+    drawings = ed._page(0).get_drawings()
+    assert len(drawings) >= 3
+    red = next(d for d in drawings if d.get("color") and abs(d["color"][0] - 1) < 0.01 and d["color"][1] < 0.01)
+    assert any(item[0] == "c" for item in red["items"])  # 베지어 곡선으로 그려짐
+    hl = next(d for d in drawings if d.get("stroke_opacity") is not None and d["stroke_opacity"] < 0.5)
+    assert hl["width"] == 14
+    assert ed.can_undo
+    with pytest.raises(ValueError):
+        ed.draw_stroke(0, [])
