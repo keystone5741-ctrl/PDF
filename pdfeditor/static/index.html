@@ -556,9 +556,40 @@
   $('btn-undo').addEventListener('click', () => mutate('/undo', {}, '실행 취소'));
   $('btn-redo').addEventListener('click', () => mutate('/redo', {}, '다시 실행'));
 
+  // ------------------------------------------------------------ 데스크톱 창 모드 (pywebview) 연동
+  // 자체 창으로 실행 중이면 window.pywebview.api 가 있고, 파일 열기/저장에 운영체제 기본 대화상자를 씁니다.
+  const native = () => (window.pywebview && window.pywebview.api) ? window.pywebview.api : null;
+  function baseName() { return (state.name || 'document').replace(/\.pdf$/i, ''); }
+  async function saveToPath(path) {
+    const r = await post(docUrl('/save'), { path });
+    state.path = r.path; state.name = r.path.split(/[\\/]/).pop(); $('filename').textContent = state.name; $('filename').title = r.path;
+    setStatus('저장 완료: ' + r.path, 'ok');
+  }
+  async function openViaDialog() {
+    const api = native();
+    if (!api) { $('file-input').click(); return; }
+    const path = await api.pick_open();
+    if (!path) return;
+    try {
+      const st = await post('/api/open', { path });
+      state.current = 0; closeEditor(); applyState(st); setStatus(`열림: ${st.name} (${st.page_count}페이지)`, 'ok');
+    } catch (e) { setStatus('열기 실패: ' + e.message, 'err'); }
+  }
+  function applyDesktopMode() {
+    if (!native()) return;
+    document.body.classList.add('desktop');
+    $('btn-download').textContent = '💾 다른 이름으로 저장';
+    $('btn-download').title = '위치를 골라 편집본을 저장';
+    $('btn-save').title = '원본 파일에 덮어쓰기';
+    $('extract-path').placeholder = '추출 버튼을 누르면 저장 위치를 고릅니다';
+    $('extract-path').disabled = true;
+  }
+  window.addEventListener('pywebviewready', applyDesktopMode);
+  if (native()) applyDesktopMode();
+
   // ------------------------------------------------------------ 열기 / 저장 / 다운로드
-  $('btn-open').addEventListener('click', () => $('file-input').click());
-  $('btn-open2').addEventListener('click', () => $('file-input').click());
+  $('btn-open').addEventListener('click', openViaDialog);
+  $('btn-open2').addEventListener('click', openViaDialog);
   $('file-input').addEventListener('change', (ev) => { if (ev.target.files[0]) openFile(ev.target.files[0]); ev.target.value = ''; });
   const viewer = $('viewer');
   viewer.addEventListener('dragover', (ev) => { if ([...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); viewer.classList.add('drag-over'); } });
@@ -568,8 +599,26 @@
     const f = ev.dataTransfer.files && ev.dataTransfer.files[0];
     if (f) { ev.preventDefault(); openFile(f); }
   });
-  $('btn-download').addEventListener('click', () => { window.location.href = docUrl('/download'); setStatus('편집된 PDF 를 다운로드합니다.', 'ok'); });
-  $('btn-save').addEventListener('click', () => {
+  $('btn-download').addEventListener('click', async () => {
+    const api = native();
+    if (api) {
+      const path = await api.pick_save(baseName() + '_edited.pdf');
+      if (!path) return;
+      try { await saveToPath(path); } catch (e) { setStatus('저장 실패: ' + e.message, 'err'); }
+      return;
+    }
+    window.location.href = docUrl('/download'); setStatus('편집된 PDF 를 다운로드합니다.', 'ok');
+  });
+  $('btn-save').addEventListener('click', async () => {
+    const api = native();
+    if (api) {
+      // 원본 경로가 있으면 바로 덮어쓰고, 없으면(업로드로 연 경우) 저장 위치를 고름
+      let path = state.path;
+      if (path) { if (!confirm(`원본 파일을 덮어쓸까요?\n${path}`)) return; }
+      else { path = await api.pick_save(baseName() + '.pdf'); if (!path) return; }
+      try { await saveToPath(path); } catch (e) { setStatus('저장 실패: ' + e.message, 'err'); }
+      return;
+    }
     $('save-path').value = state.path || '';
     $('modal-save').classList.add('open'); $('save-path').focus();
   });
@@ -603,8 +652,10 @@
   $('extract-cancel').addEventListener('click', () => $('modal-extract').classList.remove('open'));
   $('extract-go').addEventListener('click', async () => {
     const range = $('extract-range').value.trim();
-    const path = $('extract-path').value.trim();
+    let path = $('extract-path').value.trim();
     if (!range) { setStatus('추출할 페이지 범위를 입력하세요.', 'err'); return; }
+    const api = native();
+    if (api) { path = await api.pick_save(baseName() + '_pages.pdf'); if (!path) return; }
     try {
       const res = await post(docUrl('/extract'), { range, path: path || undefined });
       if (path) { setStatus(`추출 완료 (${res.count}페이지): ${res.path}`, 'ok'); }
@@ -620,7 +671,9 @@
   });
   $('extract-each').addEventListener('click', async () => {
     const range = $('extract-range').value.trim();
-    const folder = $('extract-path').value.trim();
+    let folder = $('extract-path').value.trim();
+    const api = native();
+    if (api) { folder = await api.pick_folder(); if (!folder) return; }
     if (!folder) { setStatus('페이지별 저장은 저장 경로(폴더)가 필요합니다.', 'err'); return; }
     try {
       const r = await post(docUrl('/extract_each'), { range, folder });

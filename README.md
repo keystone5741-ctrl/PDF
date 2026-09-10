@@ -14,7 +14,23 @@ PDF 파일의 **글을 수정하거나 새로 추가**하고, **페이지 순서
 | 페이지 추출 | `1-3, 5, 8-` 처럼 범위를 지정해 새 PDF 로 저장 (페이지별 저장도 가능) |
 | 그 외 | 페이지 삭제·회전·복제, 실행 취소/다시 실행, 확대/축소 |
 
-## 설치 및 실행
+## 가장 쉬운 방법: 실행 파일(exe) 받기
+
+Windows 라면 파이썬 설치 없이 `PDFEditor.exe` 하나만 받아 더블클릭하면 됩니다. 검은 명령창 없이 프로그램 창이 뜨고, 인터넷 없이 동작합니다.
+
+- 최신 빌드: 저장소의 **Actions** 탭 → 가장 최근 "테스트 및 실행 파일 빌드" 실행 → 아래 **Artifacts** 의 `PDFEditor-windows` 를 내려받아 압축을 풉니다.
+- 정식 버전: **Releases** 페이지에 `PDFEditor.exe` 가 첨부됩니다 (`v1.0.0` 같은 태그를 올리면 자동으로 만들어집니다).
+- 처음 실행할 때는 압축을 푸는 시간 때문에 몇 초 걸릴 수 있습니다. Windows 가 "알 수 없는 게시자" 경고를 띄우면 "추가 정보 → 실행" 을 누르세요.
+- 창이 뜨지 않으면 Edge WebView2 런타임이 없는 오래된 Windows 일 수 있습니다. 이 경우 자동으로 브라우저로 대신 열립니다.
+
+실행 파일을 직접 만들려면:
+
+```bash
+pip install -r requirements.txt -r requirements-desktop.txt
+pyinstaller pdfeditor.spec --noconfirm      # dist/PDFEditor.exe 생성
+```
+
+## 소스로 실행
 
 Python 3.10 이상이 필요합니다.
 
@@ -23,6 +39,8 @@ pip install -r requirements.txt
 python main.py              # 브라우저가 자동으로 열립니다 (http://127.0.0.1:8765)
 python main.py 문서.pdf     # 파일을 바로 열면서 실행
 ```
+
+브라우저 대신 자체 창으로 띄우려면 `pip install pywebview` 후 `python desktop_main.py` (또는 `python main.py desktop`) 를 실행합니다.
 
 Windows 는 `run.bat` 을 더블클릭, macOS/Linux 는 `./run.sh` 를 실행해도 됩니다 (가상환경을 자동으로 만들어 줍니다).
 `run.bat` 창이 바로 닫히거나 "파이썬을 찾을 수 없습니다" 가 나오면, 파이썬 설치 시 "Add python.exe to PATH" 를 체크했는지 확인하세요.

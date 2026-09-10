@@ -134,6 +134,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--debug", action="store_true")
     s.set_defaults(func=cmd_serve)
 
+    s = sub.add_parser("desktop", help="브라우저 대신 자체 창으로 실행 (pywebview 필요)")
+    s.add_argument("file", nargs="?", help="시작할 때 열 PDF 파일")
+    s.set_defaults(func=lambda a: __import__("pdfeditor.desktop", fromlist=["main"]).main([a.file] if a.file else []))
+
     s = sub.add_parser("info", help="문서 정보")
     s.add_argument("file")
     s.set_defaults(func=cmd_info)
@@ -205,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
-    known = {"serve", "info", "extract", "reorder", "delete", "rotate", "add-text", "replace", "blocks", "edit-block"}
+    known = {"serve", "desktop", "info", "extract", "reorder", "delete", "rotate", "add-text", "replace", "blocks", "edit-block"}
     # 하위 명령 없이 실행하면 serve 로 간주 (python main.py [파일.pdf])
     if not argv or argv[0] not in known and not argv[0].startswith("-"):
         argv = ["serve"] + argv
