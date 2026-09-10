@@ -185,7 +185,8 @@ def create_app(initial_file: str | None = None) -> Flask:
     def page_blocks(doc_id, page):
         ed = get_doc(doc_id)
         w, h = ed.page_size(page)
-        return jsonify({"width": w, "height": h, "blocks": [b.to_dict() for b in ed.get_text_blocks(page)]})
+        merge = request.args.get("merge", "0") in ("1", "true", "yes")
+        return jsonify({"width": w, "height": h, "blocks": [b.to_dict() for b in ed.get_text_blocks(page, merge_paragraphs=merge)]})
 
     @app.get("/api/doc/<doc_id>/page/<int:page>/text")
     def page_text(doc_id, page):

@@ -173,6 +173,7 @@
     <span>굵기</span><input type="number" id="pen-width" min="0.5" max="40" step="0.5" value="2.5">
   </span>
   <button id="btn-showblocks" disabled title="수정 가능한 텍스트 영역을 표시">🔲 텍스트 영역 표시</button>
+  <button id="btn-merge" disabled title="켜면 붙어 있는 줄들을 한 문단으로 묶어서 한 번에 고칩니다. 끄면 줄마다 따로 고칩니다.">¶ 문단 묶기</button>
   <button id="btn-findreplace" disabled>🔁 찾아 바꾸기</button>
   <span class="sep"></span>
   <button id="btn-extract" disabled title="원하는 페이지만 뽑아 새 PDF 로 저장">✂️ 페이지 추출</button>
@@ -280,7 +281,7 @@
   const $ = (id) => document.getElementById(id);
   const state = {
     docId: null, name: '', path: null, pages: [], current: 0, zoom: 1.0, version: 0,
-    addMode: false, penMode: false, showBlocks: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
+    addMode: false, penMode: false, showBlocks: false, mergeParagraphs: false, blocks: [], pageSize: null, selected: null, canUndo: false, canRedo: false,
     editing: null, // {kind:'replace'|'add', id?, bbox?(원본 영역), x, y, w, h (pt 단위 상자)}
   };
   const RENDER_SCALE = 1.5; // 서버에 요청하는 기본 해상도 배율
@@ -316,7 +317,7 @@
     $('filename').textContent = st.name; $('filename').title = st.path || st.name;
     $('page-count').textContent = `${st.page_count} 페이지`;
     document.title = `${st.name} - PDF 편집기`;
-    for (const id of ['btn-addtext', 'btn-pen', 'btn-showblocks', 'btn-findreplace', 'btn-extract', 'btn-zoom-in', 'btn-zoom-out', 'btn-download', 'btn-save'])
+    for (const id of ['btn-addtext', 'btn-pen', 'btn-showblocks', 'btn-merge', 'btn-findreplace', 'btn-extract', 'btn-zoom-in', 'btn-zoom-out', 'btn-download', 'btn-save'])
       $(id).disabled = false;
     $('btn-undo').disabled = !state.canUndo; $('btn-redo').disabled = !state.canRedo;
     $('empty').style.display = 'none'; $('page-wrap').style.display = 'block';
@@ -462,7 +463,7 @@
       im.src = url;
     } else { onPageImageReady(p.key); }
     try {
-      const data = await api(docUrl(`/page/${i}/blocks`));
+      const data = await api(docUrl(`/page/${i}/blocks${state.mergeParagraphs ? '?merge=1' : ''}`));
       if (token !== showToken) return;
       state.blocks = data.blocks; state.pageSize = { w: data.width, h: data.height };
       renderOverlay();
@@ -631,6 +632,17 @@
     $('btn-addtext').classList.toggle('active', state.addMode);
     $('page-wrap').classList.toggle('addmode', state.addMode);
     setStatus(state.addMode ? '글 추가 모드: 페이지에서 글을 넣을 위치를 클릭하세요.' : '글 추가 모드 해제');
+  });
+  function setMerge(on) {
+    state.mergeParagraphs = on;
+    $('btn-merge').classList.toggle('active', on);
+    try { localStorage.setItem('mergeParagraphs', on ? '1' : '0'); } catch (e) {}
+  }
+  try { setMerge(localStorage.getItem('mergeParagraphs') === '1'); } catch (e) {}
+  $('btn-merge').addEventListener('click', () => {
+    closeEditor(); setMerge(!state.mergeParagraphs);
+    if (state.docId) showPage(state.current);
+    setStatus(state.mergeParagraphs ? '문단 묶기 켬: 붙어 있는 줄을 한 상자로 고칩니다.' : '문단 묶기 끔: 줄마다 따로 고칩니다.');
   });
   $('btn-showblocks').addEventListener('click', () => {
     state.showBlocks = !state.showBlocks;
