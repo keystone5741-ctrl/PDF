@@ -261,3 +261,45 @@ def test_draw_stroke_smooth_and_highlighter(ed):
     assert ed.can_undo
     with pytest.raises(ValueError):
         ed.draw_stroke(0, [])
+
+
+def test_unreadable_glyphs_are_flagged_and_stripped(ed, monkeypatch):
+    """폰트에 유니코드 매핑이 없어 U+FFFD 로 나오는 글자는 text 에서 빼고 unreadable 로 표시한다."""
+    page = ed._page(0)
+    real = page.get_text("dict")
+    fake_line = {
+        "bbox": (100, 400, 160, 414),
+        "spans": [{"text": "���", "bbox": (100, 400, 160, 414), "size": 11.0, "color": 0}],
+    }
+    mixed_line = {
+        "bbox": (100, 500, 200, 514),
+        "spans": [{"text": "지원자 \ufffd\x00", "bbox": (100, 500, 200, 514), "size": 11.0, "color": 0}],
+    }
+    real["blocks"].append({"type": 0, "bbox": (100, 400, 160, 414), "lines": [fake_line]})
+    real["blocks"].append({"type": 0, "bbox": (100, 500, 200, 514), "lines": [mixed_line]})
+    monkeypatch.setattr(type(page), "get_text", lambda self, *a, **k: real)
+    blocks = ed.get_text_blocks(0)
+    bad = next(b for b in blocks if b.bbox[1] == 400)
+    assert bad.unreadable and bad.text == ""
+    mixed = next(b for b in blocks if b.bbox[1] == 500)
+    assert mixed.unreadable and mixed.text == "지원자"
+    assert all(not b.unreadable for b in blocks if b.bbox[1] not in (400, 500))
+    assert "unreadable" in bad.to_dict()
+
+
+def test_text_added_after_save_and_after_reopen_stays_visible():
+    """저장(폰트 서브셋) 뒤에도, 저장한 파일을 다시 연 뒤에도 새로 넣는 글자가 정상이어야 한다."""
+    ed = PDFEditor()
+    ed.add_text(0, 72, 100, "안녕", font_size=14)
+    data = ed.to_bytes()
+    ed.add_text(0, 72, 150, "후보자", font_size=14)
+    assert "후보자" in ed.get_page_text(0)
+    assert [b.text for b in ed.get_text_blocks(0)] == ["안녕", "후보자"]
+    assert not any(b.unreadable for b in ed.get_text_blocks(0))
+    re = PDFEditor(data)
+    assert "안녕" in re.get_page_text(0)
+    re.add_text(0, 72, 150, "후보자", font_size=14)
+    assert "후보자" in re.get_page_text(0)
+    assert not any(b.unreadable for b in re.get_text_blocks(0))
+    # 두 번 저장해도 크기가 작게 유지됨 (서브셋이 사본에 적용)
+    assert len(re.to_bytes()) < 400_000

@@ -89,6 +89,9 @@
     position: absolute; border: 1px dashed transparent; border-radius: 2px; cursor: text;
   }
   #page-wrap.showblocks .blk { border-color: rgba(37, 99, 235, .35); }
+  #page-wrap.showblocks .blk.unreadable { border-color: rgba(234, 88, 12, .6); }
+  /* 글 추가 모드에서는 읽을 수 없는 글자 영역이 클릭을 가로채지 않게 함 (그 자리에 새 글을 쓸 수 있도록) */
+  #page-wrap.addmode .blk.unreadable { pointer-events: none; }
   .blk:hover { background: rgba(37, 99, 235, .12); border-color: var(--accent) !important; }
   .blk.selected { background: rgba(37, 99, 235, .18); border: 1px solid var(--accent) !important; }
   #empty {
@@ -473,10 +476,10 @@
     state.blocks.forEach((b) => {
       const [x0, y0, x1, y1] = b.bbox;
       const el = document.createElement('div');
-      el.className = 'blk' + (state.editing && state.editing.kind === 'replace' && state.editing.id === b.id ? ' selected' : '');
+      el.className = 'blk' + (state.editing && state.editing.kind === 'replace' && state.editing.id === b.id ? ' selected' : '') + (b.unreadable ? ' unreadable' : '');
       el.style.left = (x0 * s) + 'px'; el.style.top = (y0 * s) + 'px';
       el.style.width = Math.max(4, (x1 - x0) * s) + 'px'; el.style.height = Math.max(4, (y1 - y0) * s) + 'px';
-      el.title = b.text;
+      el.title = b.unreadable ? '원본 글자 정보를 읽을 수 없는 영역입니다. 클릭하면 새 내용으로 바꿔 쓸 수 있습니다.' + (b.text ? '\n' + b.text : '') : b.text;
       el.addEventListener('click', (ev) => {
         if (state.editing || state.penMode) return; // 편집 중에는 적용/취소로 먼저 끝내야 함
         ev.stopPropagation(); beginReplace(b); // 글 추가 모드에서도 이미 있는 글을 누르면 그 글을 수정
@@ -543,7 +546,8 @@
   function openEditor(ed, text) {
     state.editing = ed;
     ieText.value = text; $('ie-size').value = ed.fontSize; $('ie-color').value = ed.color;
-    $('ie-title').textContent = ed.kind === 'add' ? '글 추가' : '글 수정';
+    $('ie-title').textContent = ed.kind === 'add' ? '글 추가' : (ed.unreadable ? '글 수정 (원본 글자를 읽을 수 없음)' : '글 수정');
+    ieText.placeholder = ed.unreadable ? '원본 글자를 읽을 수 없어 비워 두었습니다. 새 내용을 입력하면 이 자리에 바꿔 씁니다.' : '내용을 입력하세요';
     $('ie-delete').style.display = ed.kind === 'replace' ? '' : 'none';
     ie.classList.add('open');
     layoutEditor(); layoutCover(); growToFit(); renderOverlay();
@@ -565,7 +569,7 @@
   function beginReplace(b) {
     const [x0, y0, x1, y1] = b.bbox;
     const h = Math.max(y1 - y0 + 1, b.font_size * 1.2 * b.lines.length + 2);
-    openEditor({ kind: 'replace', id: b.id, bbox: b.bbox, x: x0, y: y0, w: freeRightEdge(b) - x0, h, fontSize: b.font_size, color: b.color }, b.text);
+    openEditor({ kind: 'replace', id: b.id, bbox: b.bbox, x: x0, y: y0, w: freeRightEdge(b) - x0, h, fontSize: b.font_size, color: b.color, unreadable: !!b.unreadable }, b.text);
   }
   function beginAdd(x, y) {
     const fontSize = parseFloat($('ie-size').value) || 12;
