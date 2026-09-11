@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import io
+import json
+import tempfile
 import threading
+import time
 import uuid
 import webbrowser
 from collections import OrderedDict
@@ -19,7 +22,7 @@ from .core import PDFEditor, parse_page_range
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-def create_app(initial_file: str | None = None) -> Flask:
+def create_app(initial_file: str | None = None, recovery_dir: str | Path | None = None, autosave_delay: float = 4.0) -> Flask:
     app = Flask(__name__, static_folder=None)
     app.config["MAX_CONTENT_LENGTH"] = 512 * 1024 * 1024  # 512MB
     docs: dict[str, PDFEditor] = {}
@@ -28,8 +31,76 @@ def create_app(initial_file: str | None = None) -> Flask:
     # PyMuPDF 는 스레드 안전하지 않으므로 /api/ 요청은 한 번에 하나씩만 처리합니다.
     api_lock = threading.RLock()
     # 렌더링 결과 캐시: (doc_id, 페이지 키, zoom) → PNG. 페이지 내용이 바뀌면 키가 달라져 자연히 무효화됩니다.
+    # 개수와 총 용량(바이트) 둘 다 제한해 큰 페이지에서도 메모리가 불어나지 않게 합니다.
     render_cache: OrderedDict[tuple, bytes] = OrderedDict()
-    RENDER_CACHE_MAX = 120
+    RENDER_CACHE_MAX = 80
+    RENDER_CACHE_BYTES = 64 * 1024 * 1024
+    cache_bytes = [0]
+
+    # 복구용 자동 저장: 마지막 변경 후 잠시 뒤 임시 폴더에 문서를 통째로 써 둡니다.
+    RECOVERY_DIR = Path(recovery_dir) if recovery_dir else Path(tempfile.gettempdir()) / "pdf-editor-recovery"
+    AUTOSAVE_DELAY = float(autosave_delay)
+    dirty: dict[str, float] = {}  # doc_id → 마지막 변경 시각
+    autosave_stop = threading.Event()
+
+    def recovery_paths(doc_id: str) -> tuple[Path, Path]:
+        return RECOVERY_DIR / f"{doc_id}.pdf", RECOVERY_DIR / f"{doc_id}.json"
+
+    def write_recovery(doc_id: str) -> None:
+        ed = docs.get(doc_id)
+        if ed is None:
+            return
+        RECOVERY_DIR.mkdir(parents=True, exist_ok=True)
+        pdf_path, meta_path = recovery_paths(doc_id)
+        tmp = pdf_path.with_suffix(".tmp")
+        tmp.write_bytes(ed.doc.tobytes(deflate=True))
+        tmp.replace(pdf_path)
+        meta_path.write_text(
+            json.dumps({"name": names.get(doc_id, ""), "path": str(ed.path) if ed.path else None, "time": time.time(), "pages": ed.page_count}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def drop_recovery(doc_id: str) -> None:
+        for path in recovery_paths(doc_id):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def autosave_loop() -> None:
+        while not autosave_stop.wait(1.0):
+            now = time.time()
+            due = [d for d, t in list(dirty.items()) if now - t >= AUTOSAVE_DELAY]
+            for doc_id in due:
+                with api_lock:
+                    if dirty.get(doc_id, now) > now - AUTOSAVE_DELAY:
+                        continue  # 그 사이 또 바뀜 → 다음 기회에
+                    try:
+                        write_recovery(doc_id)
+                        dirty.pop(doc_id, None)
+                    except Exception:
+                        dirty.pop(doc_id, None)
+
+    threading.Thread(target=autosave_loop, daemon=True, name="pdf-autosave").start()
+    app.config["AUTOSAVE_STOP"] = autosave_stop
+    app.config["RECOVERY_DIR"] = RECOVERY_DIR
+
+    def list_recoveries() -> list[dict]:
+        out = []
+        if not RECOVERY_DIR.is_dir():
+            return out
+        for meta_path in RECOVERY_DIR.glob("*.json"):
+            rid = meta_path.stem
+            pdf_path = RECOVERY_DIR / f"{rid}.pdf"
+            if rid in docs or not pdf_path.is_file():
+                continue  # 지금 열려 있는 문서의 복구본은 목록에서 제외
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            out.append({"id": rid, "name": meta.get("name") or "문서.pdf", "path": meta.get("path"), "time": meta.get("time", 0), "pages": meta.get("pages")})
+        out.sort(key=lambda m: -m["time"])
+        return out
 
     @app.before_request
     def _acquire():
@@ -37,10 +108,23 @@ def create_app(initial_file: str | None = None) -> Flask:
             api_lock.acquire()
             request.environ["pdfeditor.locked"] = True
 
+    @app.after_request
+    def _mark_dirty(response):
+        # 문서를 바꾸는 요청이 성공하면 복구용 자동 저장 예약
+        if request.method == "POST" and response.status_code == 200 and request.path.startswith("/api/doc/"):
+            parts = request.path.split("/")
+            if len(parts) > 3 and parts[3] in docs and not request.path.endswith(("/extract", "/extract_each", "/save", "/close")):
+                dirty[parts[3]] = time.time()
+        return response
+
     @app.teardown_request
     def _release(exc):
         if request.environ.pop("pdfeditor.locked", False):
             api_lock.release()
+
+    def cache_drop_doc(doc_id: str) -> None:
+        for key in [k for k in render_cache if k[0] == doc_id]:
+            cache_bytes[0] -= len(render_cache.pop(key))
 
     def cached_render(doc_id: str, ed: PDFEditor, page: int, zoom: float) -> bytes:
         key = (doc_id, ed.page_key(page), round(zoom, 3))
@@ -48,17 +132,31 @@ def create_app(initial_file: str | None = None) -> Flask:
         if png is None:
             png = ed.render_page(page, zoom)
             render_cache[key] = png
-            while len(render_cache) > RENDER_CACHE_MAX:
-                render_cache.popitem(last=False)
+            cache_bytes[0] += len(png)
+            while render_cache and (len(render_cache) > RENDER_CACHE_MAX or cache_bytes[0] > RENDER_CACHE_BYTES):
+                _, old = render_cache.popitem(last=False)
+                cache_bytes[0] -= len(old)
         else:
             render_cache.move_to_end(key)
         return png
 
     def register(editor: PDFEditor, name: str) -> str:
+        """문서를 등록합니다. 화면은 한 번에 문서 하나만 다루므로 이전 문서는 닫아 메모리를 돌려줍니다."""
         doc_id = uuid.uuid4().hex[:12]
         with lock:
+            old_ids = list(docs)
             docs[doc_id] = editor
             names[doc_id] = name
+        for old in old_ids:
+            ed = docs.pop(old, None)
+            names.pop(old, None)
+            dirty.pop(old, None)
+            cache_drop_doc(old)
+            if ed is not None:
+                try:
+                    ed.close()
+                except Exception:
+                    pass
         return doc_id
 
     def get_doc(doc_id: str) -> PDFEditor:
@@ -139,8 +237,39 @@ def create_app(initial_file: str | None = None) -> Flask:
         with lock:
             ed = docs.pop(doc_id, None)
             names.pop(doc_id, None)
+        dirty.pop(doc_id, None)
+        cache_drop_doc(doc_id)
+        drop_recovery(doc_id)
         if ed:
             ed.close()
+        return jsonify({"ok": True})
+
+    # ---------------------------------------------------------------- 복구 (자동 저장본)
+    @app.get("/api/recovery")
+    def recovery_list():
+        return jsonify({"items": list_recoveries()})
+
+    @app.post("/api/recovery/<rid>/open")
+    def recovery_open(rid):
+        pdf_path, meta_path = recovery_paths(rid)
+        if not pdf_path.is_file():
+            abort(404, "복구본을 찾을 수 없습니다.")
+        meta = {}
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        ed = PDFEditor(pdf_path.read_bytes())
+        if meta.get("path"):
+            ed.path = Path(meta["path"])  # '저장' 이 원래 파일 위치를 가리키도록
+        doc_id = register(ed, meta.get("name") or pdf_path.name)
+        drop_recovery(rid)
+        dirty[doc_id] = time.time()
+        return jsonify(doc_state(doc_id))
+
+    @app.delete("/api/recovery/<rid>")
+    def recovery_delete(rid):
+        drop_recovery(rid)
         return jsonify({"ok": True})
 
     @app.get("/api/doc/<doc_id>/download")
@@ -164,6 +293,8 @@ def create_app(initial_file: str | None = None) -> Flask:
             abort(400, "저장할 경로를 입력하세요. (파일을 업로드로 연 경우 '다운로드' 를 사용하세요)")
         target = ed.save(Path(path).expanduser())
         names[doc_id] = target.name
+        dirty.pop(doc_id, None)
+        drop_recovery(doc_id)  # 정식으로 저장했으니 복구본은 필요 없음
         return jsonify({"ok": True, "path": str(target)})
 
     # ---------------------------------------------------------------- 페이지 보기
