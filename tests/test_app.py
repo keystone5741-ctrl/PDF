@@ -8,10 +8,11 @@ from tests.test_core import make_pdf
 
 
 @pytest.fixture
-def client():
-    app = create_app()
+def client(tmp_path):
+    app = create_app(recovery_dir=tmp_path / "recovery", autosave_delay=0.3)
     app.testing = True
-    return app.test_client()
+    yield app.test_client()
+    app.config["AUTOSAVE_STOP"].set()
 
 
 def open_doc(client, n=3):
@@ -125,3 +126,35 @@ def test_ink_and_image_cache_headers(client):
     assert r.status_code == 200 and st["pages"][0]["key"] != key and st["pages"][1]["key"] == client.get(f"/api/doc/{d}").get_json()["pages"][1]["key"]
     assert client.post(f"/api/doc/{d}/page/0/ink", json={"points": []}).status_code == 400
     assert client.post(f"/api/doc/{d}/page/0/ink", json={"points": [["a", 1]]}).status_code == 400
+
+
+def test_autosave_recovery_and_single_document(client, tmp_path):
+    import time
+    d1 = open_doc(client)["id"]
+    client.post(f"/api/doc/{d1}/page/0/add_text", json={"x": 72, "y": 500, "text": "복구"})
+    deadline = time.time() + 5
+    while time.time() < deadline and not (tmp_path / "recovery" / f"{d1}.pdf").exists():
+        time.sleep(0.1)
+    assert (tmp_path / "recovery" / f"{d1}.pdf").exists() and (tmp_path / "recovery" / f"{d1}.json").exists()
+    # 열려 있는 동안에는 목록에 안 나옴
+    assert client.get("/api/recovery").get_json()["items"] == []
+    # 다른 문서를 열면 이전 문서는 닫히고(메모리 해제) 복구본이 목록에 나타남
+    d2 = open_doc(client)["id"]
+    assert client.get(f"/api/doc/{d1}").status_code == 404
+    items = client.get("/api/recovery").get_json()["items"]
+    assert [it["id"] for it in items] == [d1] and items[0]["name"] == "t.pdf"
+    # 복구본 열기 → 내용 유지, 복구 파일은 정리됨
+    st = client.post(f"/api/recovery/{d1}/open").get_json()
+    assert "복구" in client.get(f"/api/doc/{st['id']}/page/0/text").get_json()["text"]
+    assert not (tmp_path / "recovery" / f"{d1}.pdf").exists()
+    assert client.get(f"/api/doc/{d2}").status_code == 404
+    # 정식 저장하면 복구본 삭제
+    d3 = st["id"]
+    deadline = time.time() + 5
+    while time.time() < deadline and not (tmp_path / "recovery" / f"{d3}.pdf").exists():
+        time.sleep(0.1)
+    assert (tmp_path / "recovery" / f"{d3}.pdf").exists()
+    client.post(f"/api/doc/{d3}/save", json={"path": str(tmp_path / "saved.pdf")})
+    assert not (tmp_path / "recovery" / f"{d3}.pdf").exists()
+    assert client.post("/api/recovery/nope/open").status_code == 404
+    assert client.delete(f"/api/recovery/{d1}").status_code == 200

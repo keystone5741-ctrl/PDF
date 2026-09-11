@@ -142,6 +142,10 @@
   .modal .hint { color: var(--muted); font-size: 12px; line-height: 1.5; }
   .modal .btns { display: flex; gap: 6px; justify-content: flex-end; }
 
+  #recovery { display: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 12px; background: #fef3c7; color: #78350f; border-bottom: 1px solid #f59e0b; font-size: 13px; }
+  html[data-theme="dark"] #recovery { background: #3b2f0b; color: #fde68a; border-color: #b45309; }
+  #recovery.open { display: flex; }
+  #recovery button { padding: 3px 8px; font-size: 12px; }
   footer { padding: 5px 12px; background: var(--panel); border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); display: flex; gap: 12px; }
   footer .status.ok { color: var(--ok); }
   footer .status.err { color: var(--danger); }
@@ -187,6 +191,7 @@
   <button id="btn-download" class="primary" disabled>⬇️ 다운로드</button>
 </header>
 
+<div id="recovery"></div>
 <main>
   <aside id="sidebar">
     <div class="side-head">
@@ -310,6 +315,7 @@
 
   // ------------------------------------------------------------ 문서 상태
   function applyState(st) {
+    if (st.id !== state.docId) { prefetched.clear(); thumbEls.clear(); $('thumbs').innerHTML = ''; }
     state.docId = st.id; state.name = st.name; state.path = st.path; state.pages = st.pages;
     state.canUndo = st.can_undo; state.canRedo = st.can_redo;
     if (state.current >= state.pages.length) state.current = state.pages.length - 1;
@@ -935,6 +941,39 @@
     if (!inField && ev.key === 'PageDown' && state.current < state.pages.length - 1) { ev.preventDefault(); showPage(state.current + 1); }
     if (!inField && ev.key === 'PageUp' && state.current > 0) { ev.preventDefault(); showPage(state.current - 1); }
   });
+
+  // ------------------------------------------------------------ 복구 (자동 저장본)
+  async function loadRecoveries() {
+    let items = [];
+    try { items = (await api('/api/recovery')).items || []; } catch (e) { return; }
+    const box = $('recovery'); box.innerHTML = '';
+    if (!items.length) { box.classList.remove('open'); return; }
+    const label = document.createElement('span');
+    label.textContent = '⚠️ 저장하지 않은 작업이 남아 있습니다:';
+    box.appendChild(label);
+    for (const it of items) {
+      const when = it.time ? new Date(it.time * 1000).toLocaleString('ko-KR') : '';
+      const wrap = document.createElement('span');
+      wrap.style.display = 'inline-flex'; wrap.style.gap = '4px'; wrap.style.alignItems = 'center';
+      wrap.innerHTML = `<b></b> <small></small> <button class="primary">열기</button> <button>삭제</button>`;
+      wrap.querySelector('b').textContent = it.name; wrap.querySelector('small').textContent = `(${when}${it.pages ? ', ' + it.pages + '쪽' : ''})`;
+      wrap.querySelectorAll('button')[0].addEventListener('click', async () => {
+        try {
+          const st = await post(`/api/recovery/${it.id}/open`);
+          state.current = 0; closeEditor(); applyState(st); setStatus(`복구본을 열었습니다: ${st.name}. 확인 후 저장하세요.`, 'ok');
+          loadRecoveries();
+        } catch (e) { setStatus('복구 실패: ' + e.message, 'err'); }
+      });
+      wrap.querySelectorAll('button')[1].addEventListener('click', async () => {
+        if (!confirm(`${it.name} 복구본을 삭제할까요?`)) return;
+        try { await api(`/api/recovery/${it.id}`, { method: 'DELETE' }); } catch (e) {}
+        loadRecoveries();
+      });
+      box.appendChild(wrap);
+    }
+    box.classList.add('open');
+  }
+  loadRecoveries();
 
   // ------------------------------------------------------------ 시작 시 열려 있는 문서
   fetch('/api/initial').then(r => r.json()).then(st => { if (st && st.id) { applyState(st); setStatus(`열림: ${st.name}`, 'ok'); } }).catch(() => {});

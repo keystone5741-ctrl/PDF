@@ -17,17 +17,36 @@ import io
 import re
 import threading
 import uuid
+import weakref
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Iterable, Sequence
 
 import pymupdf
 
+# PyMuPDF 1.28.x 의 저널 검사 함수는 작업 중에 undo 상태를 조회하다 예외를 내서 저널 기능 전체를 막습니다.
+# MuPDF 자체는 "작업 밖에서 문서를 바꾸면" 예외를 내므로 이 검사를 건너뛰어도 안전합니다.
+if hasattr(pymupdf, "JM_have_operation"):
+    pymupdf.JM_have_operation = lambda pdf: 1  # type: ignore[assignment]
+
+
+def _textpage(page: pymupdf.Page, flags: int = 0) -> pymupdf.TextPage:
+    """페이지의 텍스트 페이지를 만듭니다 (좌표는 화면에 보이는 대로, 회전 적용 상태).
+
+    Page.get_text() 는 회전된 페이지에서 잠시 회전을 0 으로 바꿨다 되돌리는데, 이는 저널링 중에는
+    허용되지 않는 "변경"이라 오류가 납니다. 그래서 회전을 건드리지 않는 저수준 경로를 씁니다.
+    """
+    raw = page._get_textpage(None, flags=flags, matrix=pymupdf.Matrix(1, 1))
+    tp = pymupdf.TextPage(raw)
+    tp.parent = weakref.proxy(page)
+    return tp
+
 # 한글을 포함한 CJK 문자를 표시하기 위한 내장 폴백 폰트 (Droid Sans Fallback)
 FONT_NAME = "PDFEditorCJK"
 _FALLBACK_FONT: pymupdf.Font | None = None
 
-MAX_UNDO = 15  # 실행 취소 사본 개수 (문서 전체 사본이라 너무 크게 잡으면 메모리를 많이 씀)
+MAX_UNDO = 15  # 저널을 쓸 수 없을 때(비상용 사본 방식)의 실행 취소 사본 개수
 UNREADABLE = "\ufffd"  # 폰트에 유니코드 매핑이 없어 읽지 못한 글자
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]")
 
@@ -140,6 +159,14 @@ class PDFEditor:
         self._redo: list[tuple[bytes, list[str]]] = []
         # 페이지마다 내용이 바뀔 때만 달라지는 키. 화면에서 썸네일/이미지 캐시 무효화에 씁니다.
         self._page_keys: list[str] = [self._new_key() for _ in range(self.doc.page_count)]
+        # 실행 취소: MuPDF 저널(변경분만 기록, 메모리 거의 안 씀). 못 켜면 문서 사본 방식으로 대체.
+        self._journal = False
+        try:
+            self.doc.journal_enable()
+            self._journal = True
+        except Exception:
+            self._journal = False
+        self._keys_at: list[list[str]] = [list(self._page_keys)]  # 저널 위치별 페이지 키
         # PyMuPDF 는 스레드 안전하지 않으므로 문서 단위로 모든 작업을 직렬화합니다.
         self.lock = threading.RLock()
         # 삽입용 폰트 리소스 이름. 저장 시 서브셋된 폰트가 같은 이름으로 파일에 남아 있으면 그 폰트를
@@ -207,8 +234,7 @@ class PDFEditor:
         세로로 붙어 있는 줄들을 하나의 문단으로 묶습니다.
         """
         page = self._page(index)
-        rot = page.rotation_matrix
-        data = page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
+        data = _textpage(page, pymupdf.TEXT_PRESERVE_WHITESPACE).extractDICT()
 
         # 1) 줄을 조각(segment)으로 분할: (block_no, rect, text, size, color)
         segments: list[tuple[int, pymupdf.Rect, str, float, int]] = []
@@ -251,9 +277,9 @@ class PDFEditor:
                 paragraphs.append({"bno": bno, "rect": pymupdf.Rect(rect), "lines": [text.rstrip()], "size": size, "color": color})
 
         blocks: list[TextBlock] = []
-        paragraphs.sort(key=lambda pr: (round((pr["rect"] * rot).y0), round((pr["rect"] * rot).x0)))
+        paragraphs.sort(key=lambda pr: (round(pr["rect"].y0), round(pr["rect"].x0)))
         for para in paragraphs:
-            rect = para["rect"] * rot
+            rect = pymupdf.Rect(para["rect"])
             rect.normalize()
             r, g, b = _int_to_rgb(para["color"])
             cleaned = [_clean_unreadable(ln) for ln in para["lines"]]
@@ -273,19 +299,45 @@ class PDFEditor:
         return blocks
 
     def get_page_text(self, index: int) -> str:
-        return self._page(index).get_text()
+        return _textpage(self._page(index)).extractText()
 
     def search_text(self, needle: str) -> list[dict]:
         """모든 페이지에서 문자열 검색. 결과는 화면 좌표의 bbox 목록."""
         hits = []
         for i, page in enumerate(self.doc):
-            rot = page.rotation_matrix
-            for r in page.search_for(needle):
-                rr = r * rot
+            for q in _textpage(page).search(needle):
+                rr = q.rect if hasattr(q, "rect") else pymupdf.Rect(q)
                 hits.append({"page": i, "bbox": (rr.x0, rr.y0, rr.x1, rr.y1)})
         return hits
 
     # ------------------------------------------------------------------ 실행 취소
+    @contextmanager
+    def _op(self, name: str):
+        """문서를 바꾸는 작업 하나를 감쌉니다 (실행 취소 단위)."""
+        if not self._journal:
+            self._snapshot()
+            yield
+            return
+        keys_before = list(self._page_keys)
+        self.doc.journal_start_op(name)
+        try:
+            yield
+        except Exception:
+            self.doc.journal_stop_op()
+            try:
+                self.doc.journal_undo()  # 실패한 작업의 부분 변경을 되돌림
+            except Exception:
+                pass
+            self._page_keys = keys_before
+            pos = self.doc.journal_position()[0]
+            del self._keys_at[pos + 1 :]
+            raise
+        self.doc.journal_stop_op()
+        pos = self.doc.journal_position()[0]
+        del self._keys_at[pos:]
+        self._keys_at.append(list(self._page_keys))
+
+    # 저널을 쓸 수 없을 때의 비상용 사본 방식
     def _state(self) -> tuple[bytes, list[str]]:
         return self.doc.tobytes(deflate=True), list(self._page_keys)
 
@@ -303,22 +355,35 @@ class PDFEditor:
 
     @property
     def can_undo(self) -> bool:
+        if self._journal:
+            return bool(self.doc.journal_can_do()["undo"])
         return bool(self._undo)
 
     @property
     def can_redo(self) -> bool:
+        if self._journal:
+            pos = self.doc.journal_position()[0]
+            return bool(self.doc.journal_can_do()["redo"]) and len(self._keys_at) > pos + 1
         return bool(self._redo)
 
     def undo(self) -> bool:
-        if not self._undo:
+        if not self.can_undo:
             return False
+        if self._journal:
+            self.doc.journal_undo()
+            self._page_keys = list(self._keys_at[self.doc.journal_position()[0]])
+            return True
         self._redo.append(self._state())
         self._restore(self._undo.pop())
         return True
 
     def redo(self) -> bool:
-        if not self._redo:
+        if not self.can_redo:
             return False
+        if self._journal:
+            self.doc.journal_redo()
+            self._page_keys = list(self._keys_at[self.doc.journal_position()[0]])
+            return True
         self._undo.append(self._state())
         self._restore(self._redo.pop())
         return True
@@ -347,25 +412,25 @@ class PDFEditor:
         if not text:
             raise ValueError("추가할 텍스트가 비어 있습니다.")
         page = self._page(index)
-        self._snapshot()
-        fontname = self._ensure_font(page)
-        rgb = _normalize_color(color)
-        font = _fallback_font()
-        line_h = font_size * LINE_HEIGHT
-        lines = text.split("\n")
-        width = max_width if max_width else max(font.text_length(ln, fontsize=font_size) for ln in lines) + 2
-        page_w, page_h = page.rect.width, page.rect.height
-        width = min(width, max(page_w - x, font_size))
-        if height is None:
-            if max_width:
-                n_lines = sum(max(1, _wrap_count(font, ln, font_size, width)) for ln in lines)
-            else:
-                n_lines = len(lines)
-            height = n_lines * line_h + font_size * 0.4
-        rect = pymupdf.Rect(x, y, x + width, min(page_h, y + height))
-        self._insert_in_box(page, rect, text, font_size, fontname, rgb, shrink=False)
-        self._touch(index)
-        return (rect.x0, rect.y0, rect.x1, rect.y1)
+        with self._op("글 추가"):
+            fontname = self._ensure_font(page)
+            rgb = _normalize_color(color)
+            font = _fallback_font()
+            line_h = font_size * LINE_HEIGHT
+            lines = text.split("\n")
+            width = max_width if max_width else max(font.text_length(ln, fontsize=font_size) for ln in lines) + 2
+            page_w, page_h = page.rect.width, page.rect.height
+            width = min(width, max(page_w - x, font_size))
+            if height is None:
+                if max_width:
+                    n_lines = sum(max(1, _wrap_count(font, ln, font_size, width)) for ln in lines)
+                else:
+                    n_lines = len(lines)
+                height = n_lines * line_h + font_size * 0.4
+            rect = pymupdf.Rect(x, y, x + width, min(page_h, y + height))
+            self._insert_in_box(page, rect, text, font_size, fontname, rgb, shrink=False)
+            self._touch(index)
+            return (rect.x0, rect.y0, rect.x1, rect.y1)
 
     def _insert_in_box(
         self,
@@ -426,31 +491,31 @@ class PDFEditor:
         넣되 글자가 넘치면 폰트를 조금씩 줄여서 맞춥니다.
         """
         page = self._page(index)
-        self._snapshot()
-        self._touch(index)
-        rect = pymupdf.Rect(*bbox)
-        rect_unrot = rect * page.derotation_matrix
-        rect_unrot.normalize()
-        # 원본 텍스트 제거 (레닥션). 이미지는 유지.
-        page.add_redact_annot(rect_unrot, fill=False)
-        page.apply_redactions(
-            images=pymupdf.PDF_REDACT_IMAGE_NONE if keep_images else pymupdf.PDF_REDACT_IMAGE_REMOVE,
-            graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
-        )
-        if not new_text.strip():
-            return
-        fontname = self._ensure_font(page)
-        rgb = _normalize_color(color)
-        size = float(font_size or 11.0)
-        if target_bbox is not None:
-            box = pymupdf.Rect(*target_bbox)
-            box.normalize()
-            self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=False)
-            return
-        # 새 텍스트가 들어갈 영역: 원래 영역을 오른쪽 빈 공간까지 넓히고 아래로 약간 여유를 둠
-        right = self._free_right_edge(index, rect)
-        box = pymupdf.Rect(rect.x0, rect.y0, max(right, rect.x0 + size), rect.y1 + size * 0.5)
-        self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=True)
+        with self._op("글 수정"):
+            self._touch(index)
+            rect = pymupdf.Rect(*bbox)
+            rect_unrot = rect * page.derotation_matrix
+            rect_unrot.normalize()
+            # 원본 텍스트 제거 (레닥션). 이미지는 유지.
+            page.add_redact_annot(rect_unrot, fill=False)
+            page.apply_redactions(
+                images=pymupdf.PDF_REDACT_IMAGE_NONE if keep_images else pymupdf.PDF_REDACT_IMAGE_REMOVE,
+                graphics=pymupdf.PDF_REDACT_LINE_ART_NONE,
+            )
+            if not new_text.strip():
+                return
+            fontname = self._ensure_font(page)
+            rgb = _normalize_color(color)
+            size = float(font_size or 11.0)
+            if target_bbox is not None:
+                box = pymupdf.Rect(*target_bbox)
+                box.normalize()
+                self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=False)
+                return
+            # 새 텍스트가 들어갈 영역: 원래 영역을 오른쪽 빈 공간까지 넓히고 아래로 약간 여유를 둠
+            right = self._free_right_edge(index, rect)
+            box = pymupdf.Rect(rect.x0, rect.y0, max(right, rect.x0 + size), rect.y1 + size * 0.5)
+            self._insert_in_box(page, box, new_text, size, fontname, rgb, shrink=True)
 
     def _free_right_edge(self, index: int, rect: pymupdf.Rect, margin: float = 18.0) -> float:
         """rect 와 같은 높이에 있는 다른 텍스트 블록 직전까지, 없으면 페이지 오른쪽 여백까지의 x 좌표."""
@@ -476,8 +541,7 @@ class PDFEditor:
         count = 0
         for i in range(self.page_count):
             page = self._page(i)
-            rot = page.rotation_matrix
-            data = page.get_text("dict")
+            data = _textpage(page).extractDICT()
             targets = []
             for block in data["blocks"]:
                 if block.get("type") != 0:
@@ -486,7 +550,7 @@ class PDFEditor:
                     text = "".join(s["text"] for s in line["spans"])
                     if old in text:
                         span = next((s for s in line["spans"] if s["text"].strip()), line["spans"][0])
-                        targets.append((pymupdf.Rect(line["bbox"]) * rot, text.replace(old, new), span))
+                        targets.append((pymupdf.Rect(line["bbox"]), text.replace(old, new), span))
             for rect, text, span in targets:
                 r, g, b = _int_to_rgb(int(span["color"]))
                 self.replace_text(
@@ -511,36 +575,30 @@ class PDFEditor:
     ) -> None:
         """화면 좌표 점 목록을 따라 선을 그립니다 (펜/형광펜).
 
-        smooth=True 면 점들을 지나는 부드러운 곡선(Catmull-Rom → Bezier)으로 그립니다.
+        그린 선의 모양은 그대로 두고, smooth=True 면 손떨림(잔진동)만 이동 평균으로 완만하게 다듬습니다.
+        새 곡선을 만들어 내거나 점을 원으로 바꾸지 않습니다.
         """
         pts = [pymupdf.Point(float(x), float(y)) for x, y in points]
         if not pts:
             raise ValueError("그릴 점이 없습니다.")
         page = self._page(index)
-        self._snapshot()
-        self._touch(index)
-        m = page.derotation_matrix
-        pts = [p * m for p in pts]
-        rgb = _normalize_color(color)
-        width = max(0.2, float(width))
-        opacity = min(1.0, max(0.05, float(opacity)))
-        shape = page.new_shape()
-        if len(pts) == 1:
-            shape.draw_circle(pts[0], width / 2)
-            shape.finish(color=rgb, fill=rgb, width=0, fill_opacity=opacity, stroke_opacity=opacity)
-        elif len(pts) < 3 or not smooth:
-            shape.draw_polyline(pts)
+        with self._op("펜"):
+            self._touch(index)
+            m = page.derotation_matrix
+            pts = [p * m for p in pts]
+            if smooth and len(pts) >= 3:
+                pts = _smooth_points(pts)
+            rgb = _normalize_color(color)
+            width = max(0.2, float(width))
+            opacity = min(1.0, max(0.05, float(opacity)))
+            shape = page.new_shape()
+            if len(pts) == 1:
+                # 점 하나: 아주 짧은 선 (둥근 끝이라 작은 점처럼 보임)
+                shape.draw_line(pts[0], pts[0] + (0.01, 0))
+            else:
+                shape.draw_polyline(pts)
             shape.finish(color=rgb, width=width, lineCap=1, lineJoin=1, stroke_opacity=opacity)
-        else:
-            # Catmull-Rom 스플라인을 3차 베지어로 변환
-            ext = [pts[0]] + list(pts) + [pts[-1]]
-            for i in range(1, len(ext) - 2):
-                p0, p1, p2, p3 = ext[i - 1], ext[i], ext[i + 1], ext[i + 2]
-                c1 = p1 + (p2 - p0) * (1 / 6)
-                c2 = p2 - (p3 - p1) * (1 / 6)
-                shape.draw_bezier(p1, c1, c2, p2)
-            shape.finish(color=rgb, width=width, lineCap=1, lineJoin=1, stroke_opacity=opacity)
-        shape.commit()
+            shape.commit()
 
     # ------------------------------------------------------------------ 페이지 조작
     def reorder_pages(self, order: Iterable[int]) -> None:
@@ -550,9 +608,9 @@ class PDFEditor:
             raise ValueError("새 순서에는 모든 페이지가 정확히 한 번씩 들어 있어야 합니다.")
         if order == list(range(self.page_count)):
             return
-        self._snapshot()
-        self.doc.select(order)
-        self._page_keys = [self._page_keys[i] for i in order]
+        with self._op("페이지 순서 변경"):
+            self.doc.select(order)
+            self._page_keys = [self._page_keys[i] for i in order]
 
     def move_page(self, src: int, dst: int) -> None:
         """src 페이지를 dst 위치로 옮깁니다 (둘 다 0 기반)."""
@@ -573,27 +631,45 @@ class PDFEditor:
             raise ValueError("모든 페이지를 삭제할 수는 없습니다.")
         if not indices:
             return
-        self._snapshot()
-        self.doc.delete_pages(indices)
-        drop = set(indices)
-        self._page_keys = [k for i, k in enumerate(self._page_keys) if i not in drop]
+        with self._op("페이지 삭제"):
+            self.doc.delete_pages(indices)
+            drop = set(indices)
+            self._page_keys = [k for i, k in enumerate(self._page_keys) if i not in drop]
 
     def rotate_page(self, index: int, degrees: int) -> None:
         page = self._page(index)
-        self._snapshot()
-        page.set_rotation((page.rotation + degrees) % 360)
-        self._touch(index)
+        with self._op("페이지 회전"):
+            page.set_rotation((page.rotation + degrees) % 360)
+            self._touch(index)
 
     def insert_blank_page(self, index: int | None = None, width: float = 595, height: float = 842) -> None:
-        self._snapshot()
-        self.doc.new_page(pno=-1 if index is None else index, width=width, height=height)
-        self._page_keys.insert(self.page_count - 1 if index is None else index, self._new_key())
+        pos = self.page_count if index is None else index
+        if not 0 <= pos <= self.page_count:
+            raise IndexError(f"삽입 위치 범위 초과: {pos + 1}")
+        with self._op("빈 페이지 추가"):
+            if self._journal:
+                # 저널링 중에는 new_page 를 쓸 수 없어, 기존 페이지를 복제한 뒤 내용을 비우는 방식으로 만듭니다.
+                self.doc.fullcopy_page(0, -1)
+                page = self.doc[-1]
+                xref = self.doc.get_new_xref()
+                self.doc.update_object(xref, "<<>>")
+                self.doc.update_stream(xref, b"")
+                self.doc.xref_set_key(page.xref, "Contents", f"{xref} 0 R")
+                self.doc.xref_set_key(page.xref, "Annots", "null")
+                self.doc.xref_set_key(page.xref, "Rotate", "0")
+                self.doc.xref_set_key(page.xref, "MediaBox", f"[0 0 {width:g} {height:g}]")
+                self.doc.xref_set_key(page.xref, "CropBox", "null")
+                if pos != self.page_count - 1:
+                    self.doc.move_page(self.page_count - 1, pos)
+            else:
+                self.doc.new_page(pno=-1 if index is None else index, width=width, height=height)
+            self._page_keys.insert(pos, self._new_key())
 
     def duplicate_page(self, index: int) -> None:
         self._page(index)
-        self._snapshot()
-        self.doc.fullcopy_page(index, index + 1)
-        self._page_keys.insert(index + 1, self._new_key())
+        with self._op("페이지 복제"):
+            self.doc.fullcopy_page(index, index + 1)
+            self._page_keys.insert(index + 1, self._new_key())
 
     # ------------------------------------------------------------------ 추출 / 저장
     def extract_pages(self, pages: Iterable[int] | str) -> bytes:
@@ -656,6 +732,16 @@ def _segment_from_spans(bno: int, spans: list[dict]) -> tuple[int, pymupdf.Rect,
     text = "".join(sp["text"] for sp in spans)
     first = next((sp for sp in spans if sp["text"].strip()), spans[0])
     return bno, rect, text, float(first["size"]), int(first["color"])
+
+
+def _smooth_points(pts: list[pymupdf.Point], passes: int = 2) -> list[pymupdf.Point]:
+    """양 끝점은 고정한 채 이웃 3점 이동 평균을 여러 번 적용해 잔진동을 줄입니다 (형태는 유지)."""
+    out = list(pts)
+    for _ in range(passes):
+        if len(out) < 3:
+            break
+        out = [out[0]] + [(out[i - 1] + out[i] * 2 + out[i + 1]) * 0.25 for i in range(1, len(out) - 1)] + [out[-1]]
+    return out
 
 
 def _wrap_count(font: pymupdf.Font, line: str, size: float, width: float) -> int:

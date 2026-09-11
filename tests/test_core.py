@@ -269,14 +269,19 @@ def test_page_keys_change_only_for_edited_pages(ed):
 
 
 def test_draw_stroke_smooth_and_highlighter(ed):
-    pts = [(100, 500), (140, 520), (180, 500), (220, 540), (260, 500)]
+    # 잔진동이 섞인 선: 위아래로 2pt 씩 떨리는 거의 수평선
+    pts = [(100 + i * 10, 500 + (2 if i % 2 else -2)) for i in range(12)]
     ed.draw_stroke(0, pts, color="#ff0000", width=3)
     ed.draw_stroke(0, [(100, 600), (300, 600)], color="#ffeb3b", width=14, opacity=0.35)
-    ed.draw_stroke(0, [(50, 50)], color="#000000", width=4)  # 점 하나 → 원
+    ed.draw_stroke(0, [(50, 50)], color="#000000", width=4)  # 점 하나 → 아주 짧은 선
     drawings = ed._page(0).get_drawings()
     assert len(drawings) >= 3
     red = next(d for d in drawings if d.get("color") and abs(d["color"][0] - 1) < 0.01 and d["color"][1] < 0.01)
-    assert any(item[0] == "c" for item in red["items"])  # 베지어 곡선으로 그려짐
+    assert all(item[0] == "l" for item in red["items"])  # 곡선을 새로 만들지 않고 선분으로 그림
+    ys = [item[1].y for item in red["items"]]
+    inner = ys[2:-2]
+    assert max(inner) - min(inner) < 1.0  # 원래 4pt 떨림이 거의 사라짐
+    assert abs(ys[0] - 498) < 0.01  # 시작점은 그대로
     hl = next(d for d in drawings if d.get("stroke_opacity") is not None and d["stroke_opacity"] < 0.5)
     assert hl["width"] == 14
     assert ed.can_undo
@@ -284,10 +289,33 @@ def test_draw_stroke_smooth_and_highlighter(ed):
         ed.draw_stroke(0, [])
 
 
+def test_journal_undo_is_cheap_and_correct(ed):
+    assert ed._journal, "저널 모드로 동작해야 함"
+    ed.add_text(0, 72, 500, "하나")
+    ed.rotate_page(1, 90)
+    ed.reorder_pages([3, 2, 1, 0])
+    ed.delete_pages([0])
+    ed.duplicate_page(0)
+    ed.insert_blank_page(1)
+    assert ed.page_count == 5 and ed.get_page_text(1).strip() == ""
+    n = 0
+    while ed.undo():
+        n += 1
+    assert n == 6 and ed.page_count == 4 and "하나" not in ed.get_page_text(0)
+    assert ed.page_info()[1]["rotation"] == 0
+    while ed.redo():
+        pass
+    assert ed.page_count == 5 and ed.get_page_text(1).strip() == ""
+    ed.undo(); ed.undo()
+    ed.add_text(0, 72, 520, "새 가지")  # 되돌린 뒤 새 작업 → 다시 실행 불가
+    assert not ed.can_redo and ed.can_undo
+
+
 def test_unreadable_glyphs_are_flagged_and_stripped(ed, monkeypatch):
     """폰트에 유니코드 매핑이 없어 U+FFFD 로 나오는 글자는 text 에서 빼고 unreadable 로 표시한다."""
     page = ed._page(0)
-    real = page.get_text("dict")
+    from pdfeditor.core import _textpage
+    real = _textpage(page).extractDICT()
     fake_line = {
         "bbox": (100, 400, 160, 414),
         "spans": [{"text": "���", "bbox": (100, 400, 160, 414), "size": 11.0, "color": 0}],
@@ -298,7 +326,13 @@ def test_unreadable_glyphs_are_flagged_and_stripped(ed, monkeypatch):
     }
     real["blocks"].append({"type": 0, "bbox": (100, 400, 160, 414), "lines": [fake_line]})
     real["blocks"].append({"type": 0, "bbox": (100, 500, 200, 514), "lines": [mixed_line]})
-    monkeypatch.setattr(type(page), "get_text", lambda self, *a, **k: real)
+
+    class FakeTP:
+        def extractDICT(self):
+            return real
+
+    import pdfeditor.core as core_mod
+    monkeypatch.setattr(core_mod, "_textpage", lambda pg, flags=0: FakeTP())
     blocks = ed.get_text_blocks(0)
     bad = next(b for b in blocks if b.bbox[1] == 400)
     assert bad.unreadable and bad.text == ""
